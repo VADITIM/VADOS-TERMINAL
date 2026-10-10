@@ -2,8 +2,36 @@
 
 ## Unreleased
 
+### Compatibility
+
+- The input bar works under a shell that is not PowerShell. It found the prompt with a regex for PowerShell's prompt string, so under bash, zsh or fish it found nothing, decided the row was not a prompt, and showed nothing at all while every keystroke still reached the shell. The prompt is now read off the screen at the marker the shell puts at the end of it.
+- fish sessions get command blocks, exit codes and the folder panel. fish was started with no shell integration at all, so a fish session was one undifferentiated stream.
+- bash and zsh terminate their markers the way the PowerShell snippet already did, which is what stops a stray `\` appearing in front of typed characters.
+- `claude`, `less`, `man`, `fzf`, `tmux`, `ssh` and the rest of that family take the whole window and are passed through untouched. Only programs that swap to the alternate screen were recognised, and the ones that repaint in place — `claude` above all — were drawn over a buffer the block renderer was still reading, which showed as a bare prompt. Recognised now from the command's name before it runs, including through a pipe, so `git log | less` is a pager session. `git diff` on its own still pages without saying so; `git --no-pager diff` is the way round it.
+- Non-ASCII output from PowerShell arrives intact. The shell was writing in the console's OEM code page while the pipe carries UTF-8, so every accented letter, box-drawing character and emoji it printed came out as replacement characters.
+
+### Panel
+
+- The folder panel can be resized by dragging its left edge, and remembers the width. Double-clicking that edge puts it back to the default.
+- Collapsing a folder no longer collapses everything inside it. Reopening it gives back the tree that was left rather than one flat level, re-read so nothing comes back stale.
+- `..` at the top of the panel opens the folder above in place, so looking one level up no longer costs a `cd`. Shift+click still writes `cd ..`.
+- Pressing Ctrl+B repeatedly opens and closes the panel. A second press during the close started the same close again, so hammering the key only ever closed.
+- Opening or closing the panel leaves the view where it was. The narrower column re-wraps every row, which made the document taller and slid what was being read up out of the window.
+
+### Animation
+
+- A new block draws its border as one line: out along the top from the centre, around both corners, down the sides, meeting at the bottom. It used to open the top and bottom edges together and then produce both full-height sides in a single frame, which was three quarters of a gesture followed by the rest of the box simply appearing.
+- The border takes the same time to draw whether the command printed two lines or two hundred.
+- The box no longer grows while its border is being drawn. It is held at its empty height for the draw, then takes the size its content needs as its own movement — before, the top edge travelled outward while the bottom edge ran away downward, and neither motion was the one being watched.
+- The accent frame and the block's own border hand over in the same beat. There was a tenth of a second with both on screen, one inside the other.
+- The whole gesture is 0.40s to the first line of output rather than 0.74s to the last of the chrome.
+
 ### Output
 
+- A finished block says how long it took, after the exit code and on the same line: `done · 1.2s`, `exit 1 · failed · 340ms`. Milliseconds under a second, one decimal past it, minutes past sixty seconds.
+- A long session stops growing without limit. Every block ever run stayed in the page — its text, its structure and its bytes — so the terminal got slower and heavier the longer it was left open. The oldest blocks are now dropped once the session passes 500 of them or a megabyte of output, and what is off screen is no longer painted.
+- Columns line up in output containing CJK characters or emoji. The font a browser reaches for on its own has no obligation to draw those at exactly two cells wide, and one character from the wrong face pushes every column right of it off by a fraction.
+- Kerning and ligatures are off in code blocks and the raw view. Both move a glyph off the cell it belongs to, which is the one thing a monospace grid cannot survive.
 - Output keeps the colour the program gave it. A block read the text off the screen and threw every cell attribute away, so `git status` rendered monochrome and the only tint in a block was the one derived from the shape of the text. Both now apply: the program's colour where it said something, the parser's where it did not. The sixteen ANSI colours are themeable and are the same in a block and in the raw view.
 - Colour lands on the right characters on a row containing a CJK glyph, an emoji or a combining mark. Runs were indexed by terminal cell, and those characters do not take one cell each, so every colour boundary after one of them sat a character or two off the text it belonged to.
 - A block can be shown as the bytes it arrived as, with Ctrl+Shift+R on the selected block, and copying it while it is raw copies those bytes. Every block now keeps its own byte log to do it with; before this the bytes were not kept at all, which is why the toggle never existed. Logs are capped and the oldest are dropped first, and a block that lost its own says so.

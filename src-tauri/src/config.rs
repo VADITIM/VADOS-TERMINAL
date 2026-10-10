@@ -35,6 +35,12 @@ const SETTLE: Duration = Duration::from_millis(200);
 pub struct Appearance {
     pub accent: String,
     pub font: String,
+    /// The cwd panel's width in CSS pixels, or `0` for "whatever the
+    /// stylesheet's `clamp()` resolves to". Zero rather than the resolved
+    /// default because the default is a viewport-relative expression and
+    /// writing a number here would freeze it at the size of whichever window
+    /// happened to be open the first time the file was written.
+    pub panel_width: u32,
 }
 
 impl Default for Appearance {
@@ -42,6 +48,7 @@ impl Default for Appearance {
         Self {
             accent: "indigo".into(),
             font: "mixed".into(),
+            panel_width: 0,
         }
     }
 }

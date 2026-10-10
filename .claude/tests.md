@@ -8,7 +8,123 @@ Order matters: the top section is the newest.
 
 ---
 
-## 2026-08-12 (latest) — Colour runs are indexed by character, not by cell
+## 2026-08-12 (latest) — The block spawn gesture
+
+Beat 2 of the handoff is now two halves, and the box is pinned to its empty height while they run. `ANIMATION.md` was updated with it — the old spec said the frame is drawn around the shape the block ends up being, and that is deliberately no longer true.
+
+- [ ] `git status`. **The border draws as one line**: out along the top from the centre, around both corners, down both sides, meeting at the bottom. Two glowing heads, and they should never leave the edge they are the end of.
+- [ ] `ls` (short output) and `npm --help` (long). **Both take the same time to draw.** That is the whole change — if the long one takes visibly longer, the constant-duration rule is not holding.
+- [ ] Watch the box while the border draws. **It must not be changing height.** It sits at head height until the border closes, then grows into its content in one movement.
+- [ ] The moment the box closes: content appears, the box grows, the box springs slightly wider and settles, and the reveal starts — all read as one beat, not three.
+- [ ] Watch the very end. There is never a frame with **two borders** (an accent ring 1px outside the block's own), and never a frame with no border at all.
+- [ ] A command that produces nothing (`cd .`, or `Start-Sleep 1`). The box must not twitch — with no content to grow into there should be no growth at all.
+- [ ] `npm ls --all`, or anything that takes a second. The border draws immediately on Enter; it does not wait for output.
+- [ ] **Ctrl+C during the draw**, and **Esc into settings during the draw**. The block lands whole: full height, its content visible, one border, no accent frame left behind. A block stuck one line tall with its output clipped away is the failure this is guarding.
+- [ ] Submit two commands in quick succession. The second gesture does not leave the first block pinned.
+- [ ] `clear` mid-gesture. Nothing is left over.
+- [ ] Turn on OS reduced motion. No draw, no growth, no bounce — blocks simply appear, and output still reveals.
+- [ ] Scroll up and let a command finish off screen, then scroll to it. It is a normal finished block.
+- [ ] A block arriving *without* a handoff — output that was not typed, e.g. a background job printing — still gets the plain rise, not the draw.
+
+---
+
+## 2026-08-12 — Shell integration beyond PowerShell, the scrollback cap, and the duration
+
+Landed ahead of verification on instruction. Two of these change something load-bearing that was working — the input mirror and how much of the session stays in the page — so they are the ones to run first.
+
+### The input bar under any shell
+
+The prompt is no longer recognised by a PowerShell-shaped regex; it is read off the screen at `133;B` and stripped by text (`stripPrompt`). The regex is still there as the fallback for the cycle before the first `B`.
+
+- [ ] **PowerShell, everything as before.** Type, backspace, paste, move the caret with ←/→, Home/End. The bar mirrors the shell exactly. This is a rewrite of the path every keystroke goes through, so anything odd here outranks the rest of this file.
+- [ ] `cd` somewhere with a long path, then type. The prompt is re-read every cycle, so the bar must not be showing a stale prompt's width — a caret parked a few characters in with nothing in front of it is what that looks like.
+- [ ] Type `(`, `{`, `[`. PSReadLine redraws the whole line for these, and it is the redraw that broke the previous two attempts at this.
+- [ ] Ctrl+C a running command, then type. PowerShell echoes `^C` in front of the redrawn prompt; the bar must still find the prompt (this is why the strip searches rather than anchors).
+- [ ] Resize the window while a half-typed command is on the line. The mirror survives the reflow.
+- [ ] F3: the overlay now has a **prompt at 133;B** row. It should hold the visible prompt text and nothing else — no escape sequences, no typed input.
+- [ ] **On Arch: bash and zsh.** The input bar works at all, which it did not before. Same checks as above.
+- [ ] **On Arch: fish.** `fish` is now started with `--init-command`. Blocks appear per command, exit codes land, the folder panel follows `cd`, and the user's own prompt is unchanged — if their prompt vanished or was replaced, the wrap failed.
+- [ ] On Arch, in bash: no stray `\` in front of typed characters (the ST→BEL change). This is the bug that was fixed on PowerShell and had been left in the other two snippets.
+
+### The scrollback cap
+
+`content-visibility` on blocks, and `trimBlocks` at 500 blocks or 1 MiB of text.
+
+- [ ] Scroll back through a long session. **Nothing jumps.** A block coming into view must not shift what is above or below it — that is `contain-intrinsic-size: auto` doing its job, and its failure looks like the scrollbar and the content disagreeing.
+- [ ] Sticky block heads still pin at the top of the scrollport as you scroll past them, and unpin. Every block's head, not just the first few.
+- [ ] Ctrl+Up/Down still walks the blocks, and the rail lands on the right one after scrolling a long way back.
+- [ ] Run a few hundred commands (`for ($i=0; $i -lt 600; $i++) { echo $i }` is one block — use something that opens many, e.g. a loop invoking a script, or just work normally for a while). The oldest blocks disappear. Nothing crashes, the view does not jump when they go, and the newest block is never the one dropped.
+- [ ] After trimming, Ctrl+Shift+R on a surviving old block still shows its bytes, and one whose log was dropped says so.
+- [ ] Select a block, then run enough commands to push it past the cap. The rail goes away rather than pointing at nothing.
+
+### The duration
+
+- [ ] Any command. The result line reads `done · 41ms` — the exit label, a `·`, the time.
+- [ ] Something slow (`Start-Sleep 2`): `done · 2.0s`. Something failing: `exit 1 · failed · 120ms`.
+- [ ] Something over a minute: `1m 4s`.
+- [ ] `help` and the startup banner have **no** duration — they did not run anywhere, and a `· 0ms` there would be a claim about a command that does not exist.
+- [ ] Ctrl+C a long command: the time is how long it ran, not zero.
+
+### Unicode and encoding
+
+- [ ] `Write-Output "héllo — ünïcode ✓ 日本語"`. Every character is what was typed, in the block view and the raw view.
+- [ ] `node compat/make.mjs`, then `cat compat/unicode/width.txt`. **Do the columns line up**, in block mode, on the rows with CJK and emoji? Compare against Windows Terminal side by side. This is the row the fixture was written for and it has never been run.
+- [ ] A code block containing `->`, `!=`, `=>`. No ligature substitutes them for a single glyph, and the columns either side stay put.
+- [ ] Type an accented character at the prompt and run it. It reaches the shell unchanged.
+
+### Screenshots
+
+- [ ] Press F2 more than twelve times. `demo/` keeps the newest twelve, the README gallery lists exactly those, and nothing else in `demo/` is touched.
+
+---
+
+## 2026-08-12 — Full-screen programs by name, the panel's width and its tree
+
+Three unrelated changes in one turn, so the sections below are independent — a failure in one says nothing about the others.
+
+### A program that owns the screen
+
+The raw view is now entered by the command's *name* as well as by the alternate screen (`RAW_COMMANDS` in `src/lib/input.js`, `rawForced` in `+page.svelte`). Nothing watches the stream for this and nothing should start to; the check that matters is the false positive, which is an ordinary command dropped into raw for no reason.
+
+- [ ] `claude`. It takes the whole window and is usable — this is the blocker that has been open since the beginning. Ctrl+C or its own quit leaves it, and the block view comes back with the next prompt.
+- [ ] `vim` and `htop` still work exactly as they did. They swap buffers, so they are reached by the *other* trigger, and the name list must not have changed anything about them.
+- [ ] `less CLAUDE.md`. A real pager, paging, and `q` leaves it.
+- [ ] `git log | less`. Same — the pipeline's last stage is what counts.
+- [ ] **The false positive check.** `git status`, `ls`, `npm --help`, `git log --oneline` all still render as blocks. Anything ordinary that lands in the raw view is a bug worth stopping for.
+- [ ] `echo vim` prints `vim` in a block. The word is an argument, not the program.
+- [ ] Run `claude`, leave it, then run `git status`. The block that ran `claude` shows its heading and result with no output body (there is nothing to keep), and the block after it renders normally.
+- [ ] Run `vim` with the folder panel open. The panel goes away for the duration and comes back afterwards at the width it had.
+- [ ] `/help` has a **Full-screen programs** section listing this.
+
+### Non-ASCII from PowerShell
+
+`integration.ps1` now sets `[Console]::OutputEncoding`, `[Console]::InputEncoding` and `$OutputEncoding` to UTF-8.
+
+- [ ] `Write-Output "héllo — ünïcode ✓ 日本語"`. Every character is what was typed, in both the block view and the raw view. Before this the accented characters were replacement glyphs.
+- [ ] The shell still starts, the prompt still appears, and `git status` still shows its colours — the whole file runs as one `-Command` argument, so a syntax error there costs the session rather than the feature.
+- [ ] Type an accented character at the prompt and run it. It reaches the shell unchanged.
+- [ ] `Get-Content CLAUDE.md` — the em dashes are **expected to still be wrong** under Windows PowerShell 5.1. That is the shell reading the file as the ANSI code page, not the terminal; Windows Terminal shows the same. Report only if it is *different* there.
+
+### The folder panel
+
+- [ ] Drag the panel's left edge. It resizes live, the terminal's right edge stays welded to it, and the rows behind do not get text-selected by the drag.
+- [ ] Let go, then run something with long rows (`git log --oneline`). It wraps at the new edge — if it wraps at the old width the PTY was not told.
+- [ ] Double-click that edge: it goes back to its original width.
+- [ ] Close the app and reopen it. The width you dragged to is still there. `%APPDATA%\vados\config.toml` has `panel_width` under `[appearance]`.
+- [ ] Drag it as narrow and as wide as it will go. It stops at both ends rather than disappearing or eating the terminal.
+- [ ] Expand a folder, expand something inside it, then collapse the outer one and open it again. **The inner folder is still open.** That is the reported bug; before this everything inside was dropped.
+- [ ] Same check after a command has run in between — the subtree comes back re-read, not stale.
+- [ ] `cd` somewhere else. The tree resets with nothing expanded, as before.
+- [ ] Click the arrow beside `..`, or the `..` itself. The parent folder's contents open underneath it, indented, without running anything. There is no second `..` inside it.
+- [ ] Shift+click `..`: still `cd ..` at the prompt, still not run.
+- [ ] **Hammer Ctrl+B.** Open, shut, open, shut, fast. It ends up in the state the last press asked for — no panel stranded mid-slide, and no run of presses that only ever closes. This is the reported one.
+- [ ] Scroll up to an older block, then Ctrl+B. **The block you were reading stays where it is** rather than sliding up out of the window. Then close the panel: same check in reverse.
+- [ ] With "Move down" selected in settings, at the tail: opening the panel leaves you at the tail.
+- [ ] `/help` lists the resize line and the new `..` line.
+
+---
+
+## 2026-08-12 — Colour runs are indexed by character, not by cell
 
 `rowRuns` moved out of `+page.svelte` into `src/lib/ansi.js` and now advances by the characters a cell holds instead of by the cell. `node src/lib/ansi.check.mjs` covers the arithmetic; what it cannot cover is that the runs still reach the screen at all, so the first check below is the one that matters — a move that quietly stopped producing runs would leave every block monochrome and pass every assertion.
 

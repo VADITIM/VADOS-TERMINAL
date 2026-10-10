@@ -1,6 +1,6 @@
 # Phase H2 — Compatibility
 
-**Status: the suite exists and has never been run (2026-08-10).** `compat/` is built — generator, fixtures, checklist. Every row in `CHECKLIST.md` is unmarked, which is the honest state: nothing here has been checked against another terminal yet. Depends on nothing.
+**Status: the suite exists and has never been run; the inline-TUI blocker is closed in code and unverified on screen (2026-08-12).** `compat/` is built — generator, fixtures, checklist. Every row in `CHECKLIST.md` is unmarked, which is the honest state: nothing here has been checked against another terminal yet. Depends on nothing.
 
 *Compatibility first, beauty second* has been the first line of [../decisions.md](../decisions.md) since the beginning, and it has never been checked. Everything known about how VAD/OS behaves under a real TUI, a real `ssh` session, or an ANSI-heavy program is anecdote from whatever the author happened to run. Three of the five entries under *Blockers* in [../tasks.md](../tasks.md) are compatibility failures found by accident.
 
@@ -83,6 +83,24 @@ Two decisions worth recording:
 **The Unicode-width blocker gave up half of itself without the suite being run (2026-08-12).** Writing the `unicode/width.txt` row's expectation down was enough to find that `rowRuns` indexed colour runs by cell and not by character, so on any row with a CJK glyph, an emoji or a combining mark the colour boundary sat off the text it was colouring. Fixed, with a self-check in `ansi.check.mjs` built on a fake buffer line — the run walk is now in `ansi.js` rather than the page, because a check that needs a live terminal is a check nobody runs. What remains of the blocker is the part only the screen can answer: whether a rendered block's *columns* still line up when a glyph takes two cells.
 
 The order is worth noting for the rest of this phase: the fixture did not have to run to be useful. Deciding what a row must show is where a compatibility suite pays first, and the three remaining blockers are all heuristics that should be left alone until the suite has actually produced evidence — per the last gotcha below.
+
+**The inline-TUI blocker closed by not being a heuristic (2026-08-12).** The gotcha above says to resist making the trigger cleverer than the evidence, and every candidate on the list at the top of this file was a way of being cleverer: repaint rate, sustained `?25l`, mouse reporting, each of them a guess about ordinary output. The one candidate that is not a heuristic was already written down and had been read as the weakest of them — the opt-out list. It is the strongest, because it is not an inference at all.
+
+`RAW_COMMANDS` / `rawCommand` in `input.js` reads the submitted line and answers from the program's name. Notes from building it:
+
+- **It is decided before the program runs, not after it starts drawing.** A program that repaints inline has already overwritten the buffer by the time anything could be inferred from it, so there is no later moment at which the question is still answerable. The line is the last point where the answer is free.
+- **The alternate screen is still the trigger it always was.** This is a second door, not a replacement: `vim` reached through a wrapper nobody thought of still swaps buffers and still gets the raw view. Two independent triggers is why the list not being exhaustive costs nothing for the alt-screen family.
+- **Every stage of a pipeline is asked**, because the program that owns the screen is the last one in it. `git log | less` is a pager session however it was reached, which recovers half of the pager blocker.
+- **Released at `133;D`, not at the next prompt**, so the block view is back for whatever the shell prints in between.
+- The line is not parsed for shell quoting, and that is deliberate rather than pending: whose quoting rules apply is a question only the phase-12 shell registry can answer. Both failure directions land on block mode, which is the cheap one.
+
+What is left of the pager blocker is `git diff` with no `less` on the line: git chooses the pager itself, so there is no name to read. `git --no-pager diff` and typing `less` yourself both work.
+
+**Two more compatibility holes closed the same day, both from writing down what a row must show rather than from running one.**
+
+**Encoding.** The pipe carries bytes and the frontend decodes them as UTF-8. Windows PowerShell 5.1 defaults `[Console]::OutputEncoding` to the console's OEM code page and `$OutputEncoding` to ASCII, so everything non-ASCII the shell itself printed reached a UTF-8 decoder as invalid bytes. `integration.ps1` now sets all three encodings. The rule that comes out of it is in [../shells.md](../shells.md): the encoding is part of the integration, not a user preference. What it does *not* fix, and must not be confused with, is 5.1 reading a BOM-less file as ANSI — that is the shell's own default, Windows Terminal shows the same mojibake, and changing it would be changing the shell's semantics from the terminal.
+
+**The Unicode grid.** A block's columns line up only while every glyph's advance is exactly one cell or exactly two, and a fallback face the system picked on its own is under no such obligation. Both font stacks — `--font-mono` and xterm's own `fontFamily`, which are two lists because xterm takes a string and cannot resolve a custom property — now name MS Gothic and Noto Sans Mono CJK ahead of the generic `monospace`; both are drawn on a 1:2 grid against a Latin mono of the same size. Kerning and ligatures are off where alignment is load-bearing, for the same reason: both move a glyph off its cell. This is the half of the width blocker that CSS can answer. The half it cannot is a *proportional* font mode showing column output, which is not a font problem and is not fixed by naming a better one.
 
 ## Gotchas to watch
 

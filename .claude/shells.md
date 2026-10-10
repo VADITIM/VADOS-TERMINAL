@@ -40,7 +40,7 @@ Prompt hooks exist; all four markers, exit code on time.
 | PowerShell | `-NoExit -Command` | wrap `prompt` function *(shipped)* |
 | bash | `--rcfile` | `PROMPT_COMMAND` + `DEBUG` trap |
 | zsh | `ZDOTDIR` | `precmd` / `preexec` |
-| fish | `--init-command` | `fish_prompt` / `fish_preexec` / `fish_postexec` events |
+| fish | `--init-command` | `fish_prompt` / `fish_preexec` / `fish_postexec` events *(shipped)* |
 | Xonsh | `XONSHRC` env var | `$PROMPT` + `events.on_precommand` / `on_postcommand` |
 | Elvish | `-rc` | `edit:before-readline` / `edit:after-command` |
 | tcsh / csh | `-c` is not viable; use `$HOME`-scoped rc or a documented manual line | `precmd` / `postcmd` special aliases, `$status` |
@@ -102,6 +102,9 @@ The original list put Nushell and Xonsh first for UX reasons and that holds; it 
 - **Wrap, never clobber, an existing prompt.** Applies to every shell where the prompt is a function or callable: PowerShell, fish, Xonsh, Elvish.
 - **Detect available shells at runtime** and only list what exists on the machine. A settings dropdown offering `elvish` on a box without it is a bug generator.
 - **The parser does not change per shell.** OSC 133 is OSC 133. If a shell needs special-casing in the frontend parser, the snippet is wrong — fix the snippet.
+- **BEL terminates every OSC, never ST.** ST (`ESC \`) is legal and all three snippets used to send it. It is two bytes with a backslash as the second, and anything that loses or consumes the ESC between them — a redraw reprinting part of the prompt, a parser reset — leaves that backslash on screen as literal text the line editor does not know is there and therefore cannot delete. This was found on PowerShell and fixed there first; the cause is not PowerShell's, so bash, zsh and fish were brought to the same rule (2026-08-12). A new snippet uses BEL.
+- **The prompt is read, not recognised.** The frontend takes the prompt's text off the screen at `133;B`, where the cursor is standing at its end, so a snippet does not have to make its prompt match any pattern the app knows. A shell that emits `B` gets a working input bar for free; one that does not falls back to a PowerShell-shaped regex and will need its own answer. This is the reason `B` is not optional in practice even though the spec treats markers as independent.
+- **The shell writes UTF-8.** The pipe carries bytes and the frontend decodes them as UTF-8, so a snippet on a platform whose shell defaults to something else has to say so — `integration.ps1` sets `[Console]::OutputEncoding`, `[Console]::InputEncoding` and `$OutputEncoding`, because Windows PowerShell 5.1 defaults all three to the console's OEM code page. POSIX shells inherit a UTF-8 locale and need nothing.
 - Nothing here touches [docs/PERFORMANCE.md](docs/PERFORMANCE.md) budgets: markers are a handful of bytes per prompt, and the parser already scans every byte once regardless.
 
 ## Open

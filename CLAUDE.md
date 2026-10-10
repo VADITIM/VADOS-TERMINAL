@@ -37,7 +37,7 @@ The plugins installed for this repo are not optional decoration. Use them by def
 
 ## Layout
 
-- `src-tauri/src/pty.rs` — PTY session, streams raw bytes to the frontend over a Tauri channel.
+- `src-tauri/src/pty.rs` — PTY session, streams raw bytes to the frontend over a Tauri channel, and picks the injection flag each shell takes. The snippets themselves are `src-tauri/resources/shell/integration.{ps1,bash,zsh,fish}`; the rules every one of them follows are in [.claude/shells.md](.claude/shells.md).
 - `src-tauri/src/config.rs` — `config.toml`: load, save, `~` expansion, and the directory watcher that pushes external edits to the frontend.
 - `src-tauri/src/screenshot.rs` — F2 debug capture. Writes `demo/` and rewrites the README gallery. Dev-only: the path comes from `CARGO_MANIFEST_DIR`.
 - `src/lib/parse.js` — output → AST. Self-check: `node src/lib/parse.check.mjs`.
@@ -46,7 +46,7 @@ The plugins installed for this repo are not optional decoration. Use them by def
 - `src/lib/anim.ts` — the animation values more than one surface uses. A shared value is a statement that two surfaces are the same gesture; anything used once stays where it is used.
 - `src/lib/components/Settings.svelte` — the Esc overlay. Owns its markup, its CSS and both halves of its animation; the page owns the values and does the applying.
 - `src/lib/reveal-plan.js` — which reveal a run of parsed text gets, and in what order. Self-check: `node src/lib/reveal-plan.check.mjs`.
-- `src/lib/input.js` — the docked input bar's non-DOM half: suggestion-strip items (drop and Tab), the ghost completion's sources, the plain word for a command whose name is an abbreviation (`COMMAND_WORDS`), the shortened cwd, shell quoting, path joining, and the selected runs of the mirrored line. Self-check: `node src/lib/input.check.mjs`.
+- `src/lib/input.js` — the docked input bar's non-DOM half: suggestion-strip items (drop and Tab), the ghost completion's sources, the plain word for a command whose name is an abbreviation (`COMMAND_WORDS`), which programs take the whole window by name (`RAW_COMMANDS` / `rawCommand`), the shortened cwd, shell quoting, path joining, and the selected runs of the mirrored line. Self-check: `node src/lib/input.check.mjs`.
 - `src-tauri/src/dir.rs` — directory listing for the Tab suggestions, and `open <path>`. Dumb like `pty.rs`: names and is-it-a-directory, nothing more.
 - `src/routes/+page.svelte` — terminal view.
 

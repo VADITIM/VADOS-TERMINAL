@@ -6,6 +6,7 @@ import {
   isMarkdown,
   parseMarkdown,
   runHint,
+  elapsed,
   exitLabel,
   lineParts,
   locate,
@@ -582,6 +583,20 @@ assert.equal(exitLabel(-1073741819), "exit 0xc0000005 · crashed (access violati
 // The same value arriving unsigned must read identically.
 assert.equal(exitLabel(3221225477), exitLabel(-1073741819));
 assert.equal(exitLabel(-1073741510), "exit 0xc000013a · stopped (ctrl+c)");
+
+// How long it took, in the unit that carries information at that scale.
+assert.equal(elapsed(0), "0ms");
+assert.equal(elapsed(37), "37ms");
+assert.equal(elapsed(999), "999ms");
+// The boundary rounds into the range it belongs to rather than reading `1000ms`.
+assert.equal(elapsed(1000), "1.0s");
+assert.equal(elapsed(1240), "1.2s");
+assert.equal(elapsed(59900), "59.9s");
+assert.equal(elapsed(60000), "1m 0s");
+assert.equal(elapsed(3723000), "62m 3s");
+// Nothing to say rather than a made-up zero, for a block that has no timing.
+assert.equal(elapsed(NaN), "");
+assert.equal(elapsed(-1), "");
 
 // A very long code block is one untinted span. Each tinted token is a DOM
 // element, and a whole-repo diff is tens of thousands of them for colour nobody

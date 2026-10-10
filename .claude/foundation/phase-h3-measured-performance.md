@@ -1,6 +1,6 @@
 # Phase H3 — Measured Performance
 
-**Status: the two implementation gaps that did not need a measurement first are closed (2026-08-10). Nothing has been measured.** `BENCHMARKS.md` exists and every row in it says *not measured*, which is the point of it. The `flood/` generators are in [phase-h2-compatibility.md](phase-h2-compatibility.md)'s `compat/make.mjs`.
+**Status: all three implementation gaps are closed (2026-08-12). Nothing has been measured.** The third — the block DOM cap and paint containment — was landed ahead of the measurement this document requires, on the user's explicit instruction to implement everything and verify afterwards. Recorded that way rather than as a decision, because the rule it went around is still the right rule. `BENCHMARKS.md` exists and every row in it says *not measured*, which is the point of it. The `flood/` generators are in [phase-h2-compatibility.md](phase-h2-compatibility.md)'s `compat/make.mjs`.
 
 [../docs/PERFORMANCE.md](../docs/PERFORMANCE.md) says it itself, under *Open*:
 
@@ -82,7 +82,16 @@ What replaced it: a 64 KB read buffer, and **a read that comes back full means t
 
 **Backpressure is not implemented and the reason is worth keeping.** Tauri channels do not acknowledge, so there is nothing to apply back-pressure *from*. It also may not be needed: the loop only reads as fast as it sends, and a reader that has stopped reading is what makes the OS pipe block the shell — the real backpressure was always the pipe. Carries a `ponytail:` naming the measurement that would reopen it.
 
-**xterm's scrollback went from 20,000 rows to the 10,000 this file mandates.** The block DOM is still unbounded, deliberately: this document says to measure `content-visibility` alone at 100k lines before writing a windowing layer, and that measurement has not happened. Adding paint containment blind would have been the same mistake as the timer — following one rule in this file by breaking another.
+**xterm's scrollback went from 20,000 rows to the 10,000 this file mandates.**
+
+**The block DOM is bounded too, as of 2026-08-12, and it was landed ahead of its measurement on the user's explicit instruction.** That is worth recording as what it is rather than as a decision this file made: the rule above says to measure `content-visibility` at 100k lines *before* writing anything, and the measurement still has not happened. What landed:
+
+- `content-visibility: auto` with **`contain-intrinsic-size: auto 360px`** on `.block`. The `auto` keyword is the part that matters — it makes the browser remember the height a block had while it was rendered, so a block that has been on screen once keeps its real size when it is skipped. Without it, scrolling back through a session jumps at every block that comes into view, because each one claims the fallback height until it is laid out. Output arrives at the bottom of the view, so in practice every block has been rendered once and the fallback is never reached.
+- `trimBlocks` — 500 blocks or 1 MiB of rendered text, oldest dropped first, on the one event that adds a block. It disposes the xterm marker (a live object pinning a buffer row), the incremental-read cursor, the colour runs and the byte log; a block dropped from the array alone would look freed and would not be.
+- The text bound is counted in **characters rather than lines**, which is a deliberate corner: a line count means walking every buffer for newlines on every command, to enforce a bound whose purpose is to be approximately right. 1 MiB is 10,000 lines at a hundred columns.
+- `syncStuck` now skips a head whose rect is empty, which is what a skipped block's descendants report. Without it every off-screen head reads as being at the top of the window and gets the stuck class.
+
+**What is still unmeasured is everything**, and the two changes above are exactly the kind that need a before and an after. `BENCHMARKS.md` records them as landed without one, which is the honest version of that.
 
 ## Gotchas to watch
 

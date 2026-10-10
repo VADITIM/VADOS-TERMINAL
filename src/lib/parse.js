@@ -934,6 +934,31 @@ export function exitLabel(code) {
 }
 
 /**
+ * How long a command took, for the dot-separated tail of the result line.
+ *
+ * Three ranges, because the precision that is interesting changes with the
+ * scale. Under a second the milliseconds *are* the number — the difference
+ * between 30 ms and 300 ms is the difference between instant and noticeable,
+ * and `0.3s` throws that away. Past a second nobody is counting milliseconds,
+ * so one decimal is all of it. Past a minute the seconds are what is left of a
+ * number whose real unit is minutes.
+ *
+ * A run that took no measurable time renders as `0ms` rather than being
+ * dropped: the line is the same shape every time, and a missing figure would
+ * read as a missing measurement rather than a fast command.
+ *
+ * @param {number} ms
+ * @returns {string}
+ */
+export function elapsed(ms) {
+  if (!(ms >= 0)) return "";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)}m ${total % 60}s`;
+}
+
+/**
  * The codes worth naming, keyed unsigned. Curated rather than exhaustive: these
  * are the ones that come back from ordinary use — a command that was
  * interrupted, one that crashed, one that was never there.

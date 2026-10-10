@@ -117,7 +117,9 @@ This is the whole rule behind the settings panel: the panel is focal and gets th
 | Settings panel leave (to 6dvh above) | 0.2s | `power2.in` |
 | Raw/block mode crossfade | 0.2s | `power1.inOut` |
 | **Handoff — mark run (anticipation)** | 0.16s | `power2.inOut` |
-| **Handoff — border draw** | 0.34s | `power2.inOut` |
+| **Handoff — border draw, top edge** | 0.18s | `power2.inOut` |
+| **Handoff — border draw, sides closing** | 0.16s, starting 0.04s early | `power2.inOut` |
+| **Handoff — box grows into its content** | 0.28s | `power3.out` |
 | **Handoff — box bounce (0.4dvw wider)** | 0.18s | `back.out(2)` |
 | **Settle (element losing focus)** | 0.16s | discrete — see *Two bounces* |
 | Glitch entrance | 0.35s | `rough(...)` — see *The glitch* |
@@ -144,8 +146,8 @@ The default shape for any action that moves content from one region of the UI to
 | Beat | What happens | Why it exists |
 |---|---|---|
 | **1. Run** | The source's leading mark travels to the **end of the content being handed over** | Anticipation, and it states what is being handed over: the throw is as long as the command is |
-| **2. Draw** | The new container's border draws outward from the **top centre**, in both directions, **glowing in the accent with the brightest point at each growing end** | The continuity is positional — the border starts from the point the mark just left, so the container reads as spawned by the ghost line rather than as a box that appeared near it. The bright head is what says the line is *being drawn* rather than being uncovered |
-| **3. Bounce** | The box closes, its content appears, the **box springs a little wider and settles**, and the reveal starts — all at the same instant | Says *arrived*. The content is what the box was drawn for; staging it after the bounce makes the container arrive twice |
+| **2. Draw** | The new container's border draws outward from the **top centre** in both directions, **and then its two sides run down to meet at the bottom** — one continuous line, **glowing in the accent with the brightest point at each growing end** | The continuity is positional — the border starts from the point the mark just left, so the container reads as spawned by the ghost line rather than as a box that appeared near it. The bright head is what says the line is *being drawn* rather than being uncovered |
+| **3. Bounce** | The box closes, its content appears, the box **grows into that content**, **springs a little wider and settles**, and the reveal starts — all from the same instant | Says *arrived*. The content is what the box was drawn for; staging it after the bounce makes the container arrive twice |
 
 The beats overlap by roughly a third. Beat 2 starts before beat 1 has fully settled, beat 3 before beat 2 has. Sequential beats read as three separate events; overlapped, they read as one gesture. On a timeline that is a negative position offset, e.g. `"-=0.05"`, not a shortened duration.
 
@@ -167,12 +169,26 @@ The frame is a separate absolutely positioned element created by the entrance an
 
 - **A clip on the block would take its content with it.** The frame is the only thing being drawn, so the frame is the only thing clipped.
 - **Svelte re-renders the block's subtree on every chunk** — the same hazard that keeps the reveal bars in their own static host.
-- The draw is `clip-path: inset(0 50% 0 50%)` → `inset(0)`. Opening from the vertical centre line grows the top edge outward from the point the mark stopped at and lands the sides last, which is the order a box gets drawn in.
+- The draw is **two halves of one clip, and they are two because one was visibly wrong.** `inset(0 gap 0 gap)` with a single number opens the top *and* bottom edges together and then produces both full-height sides in a single frame the moment the gap reaches zero. Three quarters of a gesture, and then the rest of the box simply appearing. So:
+  - **2a, the top edge.** `--gap` 50% → 0, with the bottom inset held at `calc(100% - 2px)` so only a 2px band at the top is showing. The edge opens outward from the point the mark stopped at.
+  - **2b, the sides closing.** `--drop` 100% → 0. The corners turn, the two sides run down, and the bottom edge is what they land on. Started `0.04s` before 2a finishes, so a corner is one line turning rather than two lines meeting.
+- **Both halves are constant, and that is a rule rather than a tuning.** A box is drawn in the same time whether the command printed two lines or two hundred. The draw says *a container is arriving*; how much ended up in it is not something the container's arrival is entitled to comment on, and a variable-length gesture cannot read as the same gesture twice.
 - **`power2.inOut`, never `power2.out`** — the same trap the label bar's sweep documents, and it is the one that gets "fixed" back by matching the eases around it. An `out` ease is most of the way across before the eye has found it, so the border reads as having already been there rather than as being drawn. This is a longer beat than the rest of the sequence (0.34s, at the chrome cap) for the same reason: at 0.18s a full-width draw is over before it registers as motion.
 - **The block's own border and background are transparent for the duration** and are restored at the pop. A border already on screen makes the draw a decoration over it; a filled box gives the draw nothing to describe.
 - The frame's corner radius is **one pixel larger** than the block's — its box is 1px outside it on every side, and a concentric corner is not the same radius.
 
-**One number drives the whole thing.** `--gap` is the clip's inset from each side *and* the x of each glowing head, written from a proxy in `onUpdate` rather than tweened as a `clip-path` string — one value cannot disagree with itself. Two values agreeing by tuning is a bright head that drifts off the edge it is meant to be the end of; one value cannot drift.
+**The same two numbers drive the clip and the heads, and nothing else does.** `--gap` is the clip's inset from each side *and* the x of each glowing head; `--drop` is its inset from the bottom *and* their y. Both are written from a proxy in `onUpdate` rather than tweened as a `clip-path` string. A value cannot disagree with itself — two values agreeing by tuning is a bright head that drifts off the edge it is meant to be the end of.
+
+Falling out of that: **the heads travel one continuous path** — apart along the top, around the corners, down the sides, together again at the bottom. Nothing computes that path; it is what those two numbers already describe. The heads are round rather than tall for the same reason they used to be tall: the growing end runs horizontally for the first half of the draw and vertically for the second, and a glow shaped for one of those is wrong for the other.
+
+### The box does not move while its border is being drawn
+
+**Pinned to its empty height for the whole draw, then grown into its content as its own movement.** Output lands during those three tenths of a second — for a fast command, all of it — and a border drawn around a box that is growing under it is two motions at once, neither of which is the one being watched: the top edge travels outward while the bottom edge runs away downward.
+
+- The pin is the height the block has with nothing but its head showing, measured from the head rather than from the block, because a command that finishes inside one PTY chunk mounts with all of its output already in place.
+- It is carried by a `data-spawn` attribute, which is also what keeps `growBlock`'s observer off a property something else is tweening. One fact, not two that have to agree.
+- **The containment is `overflow: clip` with `overflow-clip-margin: 2px`, never `overflow: hidden`.** The frame sits 1px outside the block on every side, so hiding the overflow cuts the border off the block that is drawing it. The margin is the one thing that says *contain the content, keep painting just past the edge*.
+- The growth outlives the timeline that starts it, so that timeline must not `clearProps` the height on completion, and an interrupt has to land the growth as well as the draw. A block left pinned is a command's whole output inside a box one line tall.
 
 **The glow is a masked gradient, not a border colour.** A `border` cannot carry a gradient that tracks a moving point, so the frame is the `.block-hue` trick again: a background clipped to a 1px ring by two composited masks. The line already drawn is the accent at 40%; each head is a tall narrow radial at the clip edge, at full accent, over a small `drop-shadow`. Tall, because past the corner the growing end is running down the side and a round glow would come off it.
 
@@ -180,7 +196,9 @@ The frame is a separate absolutely positioned element created by the entrance an
 
 **Everything inside the block is hidden for the duration of the draw** — not just its text. The reveal hides text only, so without this a code block's box, its background and its border are on screen before the border that is supposed to be enclosing them, which is the container arriving second.
 
-It is a class on the block, not a tween on its children: **output keeps arriving during the draw**, and a child that mounts mid-gesture has to be covered by the same rule. `visibility`, so the box still takes its real size and the frame is drawn around the shape the block actually ends up being.
+It is a class on the block, not a tween on its children: **output keeps arriving during the draw**, and a child that mounts mid-gesture has to be covered by the same rule. `visibility` rather than `display`, so a child still occupies its space and nothing reflows when it becomes visible.
+
+This used to be justified as *"so the frame is drawn around the shape the block actually ends up being"*, and that justification is gone with the pin above — the frame is now drawn around the block's **empty** height, deliberately, and the shape it ends up being is what it grows into afterwards.
 
 ### The bounce is on the frame, and that is what keeps the text still
 
@@ -191,6 +209,8 @@ It is a class on the block, not a tween on its children: **output keeps arriving
 - Animating `width` is banned outright and would reflow the column.
 
 So the bounce runs on the **frame**, which is an empty overlay: a `scaleX` on it widens the box the user sees and there is nothing inside it to carry. **The block's own border therefore stays transparent until the bounce has landed** — for those frames the frame *is* the border, and handing the edge back mid-stretch would snap it to its resting width.
+
+**The hand-back and the frame's fade are the same beat.** Handing the edge over first leaves an accent ring sitting 1px outside a border that is already there — the block wearing two borders for a tenth of a second. Handing it over after leaves a frame with no edge at all for the same tenth. They are one exchange and they are written as one.
 
 Amplitude is a fixed `0.4dvw` per side with the scale derived from the block's measured width, under the same rule as every other gesture here: a constant factor is a nudge on a narrow window and a lurch on a wide one.
 
@@ -238,15 +258,18 @@ t=0.00  ghost "> " mark  run    x → end of the command text   0.26s  power2.in
 t=0.00  path, sep, text  wiped  clipped from the left, driven by the mark's x   FOCAL
 t=0.00  caret            rides  x = the mark's own x, out and back      PERIPHERAL
 t=0.30  path, sep        written back, by the same clip retreating      PERIPHERAL
-t=0.10  block frame      draw   --gap 50% → 0, heads glowing  0.34s  power2.inOut    FOCAL
+t=0.10  block           pinned to its empty height; growBlock held off
+t=0.10  block frame      draw   --gap 50% → 0  (top edge)     0.18s  power2.inOut    FOCAL
+t=0.24  block frame      draw   --drop 100% → 0  (sides)      0.16s  power2.inOut    FOCAL
 t=0.30  ghost "> " mark  return x → 0                         0.12s  power2.in   PERIPHERAL
+t=0.40  block content    unhidden, and the reveal begins
+t=0.40  block            grows  height → what it holds        0.28s  power3.out  FOCAL
+t=0.40  block frame      bounce scaleX 1 → 0.4dvw wider → 1   0.18s  back.out(2)     FOCAL
 t=0.42  ghost "> " mark  settle                               0.16s  discrete    PERIPHERAL
-t=0.44  block frame      bounce scaleX 1 → 0.4dvw wider → 1   0.18s  back.out(2)     FOCAL
-t=0.44  block content    unhidden, and the reveal begins
-t=0.62  block frame      fade   autoAlpha → 0                 0.12s  power2.in   PERIPHERAL
+t=0.58  block frame      fade   autoAlpha → 0, border handed back, same beat  0.12s  power2.in
 ```
 
-Total to first revealed row: **0.44s**, inside the 0.45s sequence budget.
+Total to first revealed row: **0.40s**, inside the 0.45s sequence budget — and it is 0.40s for every command there has ever been, because the only variable-length beat in the sequence is beat 1, whose length is the width of the command the user just typed.
 
 Three things this example is actually specifying:
 
@@ -260,6 +283,7 @@ Three things this example is actually specifying:
 - **The draw starts before the mark has landed**, and the mark returns *under* the draw rather than after it. Sequential beats read as three separate events.
 - **The mark returns to rest while the block is the subject.** It is the source being left behind, so it is peripheral and it ends on the discrete settle — never the elastic, which belongs to the box that just arrived.
 - **The reveal starts at the pop, not after it.** The content is what the box was drawn for. What must not happen is content arriving *during* the draw, which is why everything inside the block is hidden until this instant.
+- **The box grows at the pop too, not before it.** The content appearing, the box taking the size that content needs, the overshoot and the reveal are one beat with four parts. Staged, they are a box that arrives, then resizes, then fills — three arrivals for one command.
 
 ### Guards
 

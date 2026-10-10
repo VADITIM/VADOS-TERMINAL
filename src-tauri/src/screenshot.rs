@@ -61,8 +61,41 @@ pub fn screenshot(window: tauri::Window) -> Result<String, String> {
     let name = format!("vados-{stamp}.png");
     image.save(dir.join(&name)).map_err(|e| e.to_string())?;
 
+    prune(&dir);
     update_readme(&root, &dir)?;
     Ok(name)
+}
+
+/// How many shots `demo/` keeps. The gallery is a README section a person
+/// reads, and nothing prunes a directory that only ever grows — fine at five,
+/// wrong at fifty, and the failure is a README nobody scrolls to the end of.
+const KEEP: usize = 12;
+
+/// Delete everything past the newest `KEEP` shots.
+///
+/// Failures are ignored on purpose: the capture already succeeded and is on
+/// disk, and a file that could not be deleted is not a reason to report the
+/// screenshot as failed. The gallery rewrite below reads the directory again
+/// afterwards, so whatever survived is what gets listed.
+fn prune(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut shots: Vec<PathBuf> = entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension()?.eq_ignore_ascii_case("png")).then_some(path)
+        })
+        .collect();
+    if shots.len() <= KEEP {
+        return;
+    }
+    // Same assumption `update_readme` runs on: `vados-<unix seconds>.png`
+    // sorts lexically into chronological order while the epoch is ten digits.
+    shots.sort_unstable();
+    for path in &shots[..shots.len() - KEEP] {
+        let _ = fs::remove_file(path);
+    }
 }
 
 /// Rewrite the block between the demo markers in `README.md` with every PNG
@@ -141,6 +174,37 @@ mod tests {
         update_readme(&dir, &shots).unwrap();
         let twice = fs::read_to_string(dir.join("README.md")).unwrap();
         assert_eq!(out, twice);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The other thing in here that deletes something the user cares about.
+    #[test]
+    fn prunes_the_oldest_shots_and_nothing_else() {
+        let dir = std::env::temp_dir().join("vados-prune-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for i in 0..KEEP as u64 + 3 {
+            fs::write(dir.join(format!("vados-17{:08}.png", i)), []).unwrap();
+        }
+        fs::write(dir.join("keep-me.txt"), []).unwrap();
+
+        prune(&dir);
+
+        let left: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(left.iter().filter(|n| n.ends_with(".png")).count(), KEEP);
+        // The oldest three went, the newest stayed, and a non-PNG in the
+        // directory is not this function's business.
+        assert!(!left.contains(&"vados-1700000000.png".to_string()), "{left:?}");
+        assert!(left.contains(&"vados-1700000014.png".to_string()), "{left:?}");
+        assert!(left.contains(&"keep-me.txt".to_string()), "{left:?}");
+
+        // Under the cap it does nothing at all.
+        prune(&dir);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), KEEP + 1);
 
         fs::remove_dir_all(&dir).unwrap();
     }

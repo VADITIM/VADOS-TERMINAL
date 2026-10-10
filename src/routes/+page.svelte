@@ -19,6 +19,7 @@
   import {
     COMMAND_NAMES,
     SUBCOMMAND_NAMES,
+    elapsed,
     exitLabel,
     lineParts,
     locate,
@@ -61,6 +62,7 @@
     completionRequest,
     completions,
     quotePath,
+    rawCommand,
     resolveDir,
     runOptions,
     segments,
@@ -102,10 +104,21 @@
   // at spawn, in Rust, before this file has run.
   let startupDir = $state("");
   let startAsAdmin = $state(false);
+  /**
+   * The cwd panel's width in CSS pixels, or 0 for the stylesheet's own
+   * `clamp()`. Zero is not a width — it is the absence of one, which is what
+   * keeps the default viewport-relative instead of frozen at whatever size the
+   * window was the first time the file was written.
+   *
+   * Not a row in the settings panel: it is set by dragging the thing itself,
+   * which is the control. The panel's tables are for choices with no direct
+   * manipulation behind them.
+   */
+  let panelWidth = $state(0);
 
   function currentConfig(): Config {
     return {
-      appearance: { accent, font: fontMode },
+      appearance: { accent, font: fontMode, panel_width: panelWidth },
       behavior: { scroll: scrollMode, reveal: revealMode },
       shell: { cwd: startupDir },
       system: { start_as_admin: startAsAdmin },
@@ -148,6 +161,7 @@
     revealMode = pick(c.behavior.reveal, REVEAL_MODES, revealMode);
     startupDir = c.shell.cwd ?? "";
     startAsAdmin = !!c.system.start_as_admin;
+    setPanelWidth(c.appearance.panel_width ?? 0);
 
     const next = pick(c.appearance.accent, ACCENTS, accent);
     if (next !== accent) {
@@ -273,6 +287,22 @@
      * subtraction at the point of use is not.
      */
     runShift: number;
+    /**
+     * When the command was submitted and when its exit code came back, as
+     * `performance.now()` readings.
+     *
+     * A monotonic clock rather than `Date.now()`: this is a *duration*, and a
+     * wall clock can be stepped by an NTP correction or a daylight-saving jump
+     * in the middle of a long build, which would report a command as having
+     * taken an hour less than nothing. A timestamp for the block head is a
+     * different value and is phase 13's.
+     *
+     * Absent on blocks VAD/OS writes itself — `help` and the banner did not
+     * run anywhere and have no duration to report, which is not the same as
+     * having taken no time.
+     */
+    startedAt?: number;
+    endedAt?: number;
   };
 
   /**
@@ -369,6 +399,27 @@
   }
 
   let mode = $state<"blocks" | "raw">("blocks");
+  /**
+   * A named full-screen program is running, so the raw view is held open for it
+   * whatever the buffer says.
+   *
+   * The alt screen is the *other* way into raw mode and it is the one that can
+   * be observed; this is the one that cannot. `claude` repaints inline and
+   * `less -X` is told not to swap buffers, so both draw over the normal buffer
+   * the block renderer reads — and no amount of watching the stream tells that
+   * apart from ordinary output without a heuristic that costs ordinary output
+   * a false positive. `rawCommand` answers from the name instead.
+   *
+   * Cleared at 133;D: the program has exited, whatever it did to the screen.
+   */
+  let rawForced = false;
+  /**
+   * `syncMode`, which lives inside the terminal's own setup closure because
+   * that is where `t` is. Published here so the two places that change
+   * `rawForced` can act on it in the same tick rather than waiting for the next
+   * chunk to arrive — the view has to be swapped *before* the program draws.
+   */
+  let syncModeNow: () => void = () => {};
   let blocks = $state<Block[]>([
     { id: 0, cwd: "", command: "", buffer: banner, closed: true, exitCode: null, md: false, runShift: 0 },
   ]);
@@ -701,6 +752,14 @@
 
     const ro = new ResizeObserver(() => {
       const next = node.getBoundingClientRect().height;
+      // The handoff owns this block's height until its border has finished
+      // drawing and the box has grown into what it holds. Two tweens on one
+      // property is the fight; `prev` is kept current so the finished height is
+      // this observer's resting state rather than a jump it thinks it missed.
+      if (node.hasAttribute("data-spawn")) {
+        prev = next;
+        return;
+      }
       // Only a real jump is worth animating. A pixel of reflow is not.
       if (next <= prev + 1) {
         prev = next;
@@ -755,6 +814,48 @@
   // removed, so `cursorCol` is unaffected. Lazy quantifier so a `>` inside the
   // typed command cannot be mistaken for the prompt's own.
   const PS_PROMPT = /^.*?PS\s+\S.*?>\s?/;
+
+  /**
+   * The prompt as the shell actually drew it this cycle, captured at OSC 133;B.
+   *
+   * **This is what makes the input bar work under a shell that is not
+   * PowerShell.** `PS_PROMPT` is a regex for one shell's prompt string, and a
+   * terminal is not allowed to depend on one — bash, zsh and fish all draw
+   * something it cannot match, so the mirror took its "no prompt on this row"
+   * bail-out and the input bar showed nothing at all while every keystroke
+   * reached the shell.
+   *
+   * `133;B` marks the column where the prompt ends and typed input begins, and
+   * the handler fires *mid-parse*, with the cursor standing exactly there. So
+   * the prompt does not have to be recognised — it can be read.
+   *
+   * **The string, not the column.** A remembered column was tried and reverted:
+   * a resize reflows the row and the column stops meaning anything. The text
+   * survives that, and it survives the other case a column cannot — PowerShell
+   * echoing `^C` in front of a redrawn prompt, which shifts the prompt right
+   * without changing it. Found with `indexOf` rather than matched at the start,
+   * which is the same unanchored behaviour `PS_PROMPT` was given for that case.
+   */
+  let promptText = "";
+
+  /**
+   * `row` with the prompt taken off the front, or `row` unchanged when no
+   * prompt could be found on it — which the caller reads as "do not mirror
+   * this row", because a row with no prompt on it has nothing to subtract and
+   * would put the prompt's own width into the caret column.
+   */
+  function stripPrompt(row: string) {
+    if (promptText) {
+      const at = row.indexOf(promptText);
+      if (at >= 0) return row.slice(at + promptText.length);
+    }
+    // Nothing captured yet, or the row no longer carries what B saw. The
+    // PowerShell regex stays as the fallback rather than being replaced by
+    // this: it is the shell that ships on the platform this runs on, and a
+    // prompt cycle whose B arrived in a chunk the mirror has not seen yet is
+    // exactly when the input bar must not go blank.
+    return row.replace(PS_PROMPT, "");
+  }
   // The shell writes the prompt text and the 133;B marker as one logical
   // unit, but a PTY read can split them across two chunks — the terminal's
   // 8 KB read boundary has no relation to the shell's write boundaries. Until
@@ -847,8 +948,12 @@
       // JSON-quoted so trailing spaces and stray escapes are visible rather
       // than invisible — the whole point of dumping this.
       ["cursor row", JSON.stringify(row)],
+      // The captured prompt is the mechanism now and the regex is the
+      // fallback, so both are shown: which one answered is the question this
+      // line exists for.
+      ["prompt at 133;B", JSON.stringify(promptText)],
       ["PS_PROMPT matches", String(PS_PROMPT.test(row))],
-      ["after strip", JSON.stringify(row.replace(PS_PROMPT, ""))],
+      ["after strip", JSON.stringify(stripPrompt(row))],
       // What xterm actually put on the wire for the last key. This is the line
       // that settles "did the shell receive this character or did the mirror
       // invent it" — everything above is downstream of it.
@@ -867,6 +972,58 @@
     return blocks[blocks.length - 1];
   }
 
+  /**
+   * The scrollback cap, applied to the block DOM.
+   *
+   * docs/PERFORMANCE.md calls unlimited scrollback *"a memory leak with a nice
+   * name"* and puts the figure at 10,000 lines. xterm has been held to that for
+   * a while; the block DOM was not, so every block ever run stayed mounted —
+   * its text, its nodes, its marker and its `<section>`. A long-lived session
+   * is exactly the case the budget exists for and exactly the case nobody hits
+   * while developing.
+   *
+   * ponytail: the text bound is counted in **characters, not lines**. A line
+   * count means walking every block's buffer for its newlines on every command,
+   * to enforce a bound whose whole purpose is to be approximately right; a
+   * character total is a property read per block. 1 MiB is 10,000 lines at a
+   * hundred columns, which is the same figure with the arithmetic done once.
+   */
+  const BLOCK_COUNT_CAP = 500;
+  const BLOCK_TEXT_CAP = 1 << 20;
+
+  /**
+   * Drop the oldest blocks until the session is inside both caps.
+   *
+   * Everything a block owns outside `blocks` goes with it — the xterm marker
+   * (a live object that keeps a buffer row pinned), the incremental-read
+   * cursor, the colour runs and the byte log. A block dropped from the array
+   * alone would look freed and would not be.
+   *
+   * The newest block is never dropped, whatever the caps say: it is the one
+   * being written to.
+   */
+  function trimBlocks() {
+    let text = 0;
+    for (const b of blocks) text += b.buffer.length;
+    while (blocks.length > 1 && (blocks.length > BLOCK_COUNT_CAP || text > BLOCK_TEXT_CAP)) {
+      const gone = blocks.shift();
+      if (!gone) break;
+      text -= gone.buffer.length;
+      markers.get(gone.id)?.dispose();
+      markers.delete(gone.id);
+      snapRead.delete(gone.id);
+      runsOf.delete(gone.id);
+      const log = rawLogs.get(gone.id);
+      if (log) {
+        rawBytes -= log.bytes;
+        rawLogs.delete(gone.id);
+      }
+      // The block it pointed at is not on screen any more, and a rail on
+      // nothing is worse than no rail.
+      if (focusedId === gone.id) focusedId = null;
+    }
+  }
+
   function openBlock(command: string) {
     // A submitted command puts the reader back at the input bar, so whatever
     // was selected in the scrollback is not what the next key acts on.
@@ -874,7 +1031,14 @@
     const id = nextId++;
     const marker = term?.registerMarker(0);
     if (marker) markers.set(id, marker);
-    blocks.push({ id, cwd: lastCwd, command, buffer: "", shown: "", closed: false, exitCode: null, md: true, runShift: 0 });
+    // The clock starts where the user's wait starts — the keystroke that sent
+    // the line, not the first byte back. Everything between the two is time
+    // they spent waiting for this command.
+    blocks.push({ id, cwd: lastCwd, command, buffer: "", shown: "", closed: false, exitCode: null, md: true, runShift: 0, startedAt: performance.now() });
+    // Once per command, on the one event that adds a block. Not per chunk: the
+    // cap is about how many blocks are kept, and that number only ever changes
+    // here.
+    trimBlocks();
   }
 
   /**
@@ -1027,9 +1191,10 @@
         ".. completes like any folder, so cd .. is one Tab away",
         "Ctrl + B — show the current folder in a panel on the right, as a tree",
         "Click a folder in the panel, or its arrow, to open it. Shift + click puts `cd` at the prompt",
-        ".. at the top of the panel goes up a folder, the same way",
+        ".. at the top of the panel opens the folder above without going there. Shift + click it for `cd ..`",
         "Click a file in the panel for the same options a file dropped on the window gets",
         "Drag a file out of the panel into any other app to open it there. It is never moved",
+        "Drag the panel's left edge to resize it. Double-click that edge to put it back",
         "Ctrl + A — select the whole input line. Backspace deletes it, typing replaces it",
         "Double-click the input bar — the same selection, from the pointer",
         "Ctrl + Up / Down — select a past command block, or click one",
@@ -1043,6 +1208,16 @@
         "Right-click a block — copy its output",
         "Shift + right-click a block — copy it as markdown",
         "Drop a file on the window — pick how to run it, or take the path alone",
+      ],
+    },
+    { kind: "heading", level: 2, text: "Full-screen programs", tone: null },
+    {
+      kind: "list",
+      items: [
+        "vim, nvim, nano, less, man, top, htop, btop, fzf, tmux, ssh, claude and the rest of that family take the whole window and are passed through untouched — no blocks, no animation, every key theirs",
+        "The ones that swap to the alternate screen are recognised as they do it. The ones that repaint in place — claude, and a pager told not to swap — are recognised by name instead, before they start",
+        "A program reached through a pipe counts: git log | less is a pager session",
+        "git diff still pages through less without saying so, so it renders as a block. git --no-pager diff is the way round it",
       ],
     },
     {
@@ -1071,11 +1246,25 @@
     });
   }
 
+  /**
+   * The ` · 1.2s` tail of a result line, or nothing at all.
+   *
+   * Nothing when the block has no timing: a block VAD/OS wrote itself never
+   * ran, and a duration of zero would be a claim about a command that does not
+   * exist. The separator is part of this rather than of the template, so the
+   * "no timing" case does not leave a dangling dot behind it.
+   */
+  function blockTime(block: Block) {
+    if (block.startedAt === undefined || block.endedAt === undefined) return "";
+    return ` · ${elapsed(block.endedAt - block.startedAt)}`;
+  }
+
   function closeBlock(exitCode: number) {
     const last = currentBlock();
     if (last && !last.closed) {
       last.closed = true;
       last.exitCode = exitCode;
+      last.endedAt = performance.now();
       // Nothing will ever read this block again, and the cache holds a copy of
       // its text.
       snapRead.delete(last.id);
@@ -1742,10 +1931,23 @@
     syncThumb();
     if (!scrollEl) return;
     const edge = scrollEl.getBoundingClientRect().top;
-    // ponytail: linear in mounted blocks. Fine until scrollback virtualization
-    // (PERFORMANCE.md) exists; that pass should hand this only visible blocks.
+    // ponytail: still linear in mounted blocks, but the mounted set is now
+    // bounded (`trimBlocks`) and the skip below takes the rest out in a rect
+    // read. A virtualization pass would hand this only visible blocks and make
+    // the walk unnecessary rather than cheap.
     for (const head of heads) {
-      head.classList.toggle("stuck", head.getBoundingClientRect().top <= edge + 0.5);
+      const rect = head.getBoundingClientRect();
+      // An empty rect means the block's contents are being skipped by
+      // `content-visibility`, so it has no layout box to be stuck against. It
+      // is off screen by definition — the whole reason it was skipped — and a
+      // rect of zeros would otherwise read as "at the very top" and stick every
+      // block in the session. The class is cleared rather than left as it was,
+      // because a block that scrolled away while stuck would keep it.
+      if (!rect.height) {
+        head.classList.remove("stuck");
+        continue;
+      }
+      head.classList.toggle("stuck", rect.top <= edge + 0.5);
     }
   }
 
@@ -2133,15 +2335,28 @@
     });
   });
 
+  function descendantsOf(rel: string) {
+    const prefix = rel + panelSep;
+    return expanded.filter((p) => p.startsWith(prefix));
+  }
+
   function toggleDir(rel: string) {
     if (expanded.includes(rel)) {
-      // Descendants go with it. Collapsing and re-expanding then re-reads,
-      // which is what makes a stale subtree impossible to keep on screen.
-      expanded = expanded.filter((p) => p !== rel && !p.startsWith(rel + panelSep));
+      // **Only this folder closes.** Its descendants stay in `expanded` — the
+      // snippet only recurses through a folder that is open, so they are off
+      // screen either way, and keeping them is what makes reopening give back
+      // the tree that was left rather than one flat level. Collapsing a folder
+      // to see past it and finding the work gone on the way back is the part
+      // that read as broken.
+      expanded = expanded.filter((p) => p !== rel);
       return;
     }
     expanded = [...expanded, rel];
-    loadDir(rel);
+    // Everything about to come back on screen, not just this level. Re-reading
+    // is what the old wholesale collapse bought, and it is bought here instead
+    // — a subtree that has been off screen since before the last command must
+    // not come back stale.
+    for (const p of [rel, ...descendantsOf(rel)]) loadDir(p);
   }
 
   /**
@@ -2171,6 +2386,47 @@
   let bandMoving = false;
   let syncBand: () => void = () => {};
 
+  /**
+   * Hold the view where it is while the band moves.
+   *
+   * Narrowing the scrollport re-wraps every row in it, so the document gets
+   * taller under a `scrollTop` that has not changed — and what the reader was
+   * looking at slides up out of the window. Nothing in the scroll logic covers
+   * this: it is not growth, not a shrink and not a mode switch, it is the same
+   * content measured against a narrower column.
+   *
+   * Two anchors, because the two scroll modes mean different things by "where
+   * the view is": "move down" means the tail and is pinned to the bottom, and
+   * everything else is pinned to whichever block is at the top of the window.
+   *
+   * ponytail: the anchor is found by walking the mounted blocks, which is
+   * linear in them — the same ceiling `syncStuck` carries, and virtualization
+   * is the same fix. Once per gesture rather than per frame, so it is nowhere
+   * near being the expensive part of this tween.
+   *
+   * @returns A function that puts the view back, called on every frame of the
+   * band's travel.
+   */
+  function holdView(): () => void {
+    if (!scrollEl) return () => {};
+    if (scrollMode === "bottom" && !tailDetached) {
+      return () => {
+        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight - scrollEl.clientHeight;
+      };
+    }
+    const top = scrollEl.getBoundingClientRect().top;
+    const anchor = [...scrollEl.querySelectorAll("section")].find(
+      (el) => el.getBoundingClientRect().bottom > top,
+    );
+    if (!anchor) return () => {};
+    const offset = anchor.getBoundingClientRect().top - top;
+    return () => {
+      if (!scrollEl) return;
+      const now = anchor.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top;
+      scrollEl.scrollTop += now - offset;
+    };
+  }
+
   function writeBand(node: HTMLElement | undefined) {
     // A multiplier on the custom property rather than a pixel figure, so the
     // width stays the `clamp()` the stylesheet owns and this code never has to
@@ -2181,11 +2437,15 @@
 
   function moveBand(node: HTMLElement, to: 0 | 1, onLanded: () => void) {
     bandTween?.kill();
+    // Measured before the first frame writes a new width, so it describes the
+    // layout the reader is currently looking at.
+    const hold = holdView();
     if (reduceMotion) {
       // Skipped, not shortened: the band snaps and the panel gets the 0.1s
       // opacity fade the reduced-motion table gives every panel slide.
       band.p = to;
       writeBand(undefined);
+      hold();
       gsap.set(node, { x: 0 });
       gsap.to(node, { autoAlpha: to, duration: 0.1, onComplete: onLanded });
       syncBand();
@@ -2198,10 +2458,17 @@
       // shorter accelerating leave on the way out.
       duration: to ? 0.34 : 0.2,
       ease: to ? "power3.out" : "power2.in",
-      onUpdate: () => writeBand(node),
+      // Written, then corrected, in the same frame: the reflow the new width
+      // causes is what the correction is measured against, so it has to have
+      // happened already.
+      onUpdate: () => {
+        writeBand(node);
+        hold();
+      },
       onComplete: () => {
         bandMoving = false;
         writeBand(node);
+        hold();
         syncBand();
         onLanded();
       },
@@ -2209,13 +2476,92 @@
     gsap.to(node, { autoAlpha: to, duration: to ? 0.2 : 0.15, ease: "power2.out" });
   }
 
+  /**
+   * The narrowest the panel may be dragged. Below this the names it exists to
+   * show are all ellipsis, which is a panel that is open and useless.
+   */
+  const PANEL_MIN = 160;
+
+  /** How far one arrow key moves the edge. */
+  const PANEL_STEP = 16;
+
+  /**
+   * Write the panel's width, or clear it back to the stylesheet's `clamp()`.
+   *
+   * Only `--panel-w` is ever written, never a pixel width onto `.scroll` — the
+   * band and every consumer of it are a `calc` over this one property, and a
+   * second source for the same number is how the panel's edge and the
+   * terminal's edge come apart.
+   */
+  function setPanelWidth(px: number) {
+    // Capped against the window rather than a constant: half the screen is a
+    // split view, and this is a file list.
+    const max = Math.round(window.innerWidth * 0.6);
+    panelWidth = px > 0 ? Math.round(Math.min(Math.max(px, PANEL_MIN), max)) : 0;
+    if (panelWidth) appEl?.style.setProperty("--panel-w", `${panelWidth}px`);
+    else appEl?.style.removeProperty("--panel-w");
+  }
+
+  /**
+   * Drag the panel's left edge.
+   *
+   * The width is derived from the pointer's distance to the window's right edge
+   * rather than accumulated from a delta: the panel is anchored on that side, so
+   * the pointer and the edge stay together however far the drag overshoots a
+   * clamp and comes back.
+   */
+  function panelGrab(e: PointerEvent) {
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+    // Or the pointer picks a text selection up out of the rows behind it.
+    e.preventDefault();
+    // The resize observer's callback re-reads the open block, re-renders it and
+    // round-trips to Rust — the same reason the band tween mutes it. Released,
+    // and run once, when the pointer comes up.
+    bandMoving = true;
+    const move = (ev: PointerEvent) => setPanelWidth(window.innerWidth - ev.clientX - 12);
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      bandMoving = false;
+      syncBand();
+      saveConfig();
+      refocus();
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  }
+
+  function panelGrabKey(e: KeyboardEvent) {
+    const step = { ArrowLeft: PANEL_STEP, ArrowRight: -PANEL_STEP }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setPanelWidth((panelWidth || (panelEl?.offsetWidth ?? PANEL_MIN)) + step);
+    saveConfig();
+  }
+
   /** The entrance. The panel pushes the terminal aside rather than arriving after it has moved. */
   function panelSlide(node: HTMLElement) {
+    // The stored width may have been read before `appEl` was bound, and it is
+    // only ever visible from here on.
+    setPanelWidth(panelWidth);
     band.p = 0;
     gsap.set(node, { autoAlpha: 0 });
     writeBand(node);
     moveBand(node, 1, () => {});
   }
+
+  /**
+   * A close is in flight. `panelOpen` is still true throughout it — the flag is
+   * what keeps the node mounted for the tween to move — so it cannot answer
+   * "is this panel on its way in or on its way out", and a second Ctrl+B during
+   * the leave read as "it is open, close it" and started the same leave again.
+   * Hammering the key therefore only ever closed, which is what was reported.
+   */
+  let panelClosing = false;
 
   // Same rule as `closeSettings`: the tween owns the unmount, because Svelte
   // tears the `{#if}` out the instant the flag flips.
@@ -2224,13 +2570,24 @@
       panelOpen = false;
       return;
     }
+    panelClosing = true;
     moveBand(panelEl, 0, () => {
+      panelClosing = false;
       panelOpen = false;
       refocus();
     });
   }
 
   function togglePanel() {
+    // Caught mid-leave: reverse it from where it stands rather than unmounting
+    // and remounting, which would restart the entrance from zero width and drop
+    // the tree's expansion with it. `moveBand` kills the outgoing tween, so its
+    // `onComplete` — the one that would have unmounted the panel — never runs.
+    if (panelClosing && panelEl) {
+      panelClosing = false;
+      moveBand(panelEl, 1, () => {});
+      return;
+    }
     if (panelOpen) closePanel();
     else panelOpen = true;
   }
@@ -2661,6 +3018,56 @@
   const BOUNCE_DVW = 0.4;
 
   /**
+   * The border draw, in two halves.
+   *
+   * **The top edge first, opening from the centre to both corners; then the two
+   * sides running down to meet at the bottom.** One clip drives both — the
+   * horizontal inset for the first half, the vertical for the second — so the
+   * two glowing heads travel one continuous path: apart along the top, around
+   * the corners, down the sides, together again at the bottom.
+   *
+   * It used to be one number. The clip was `inset(0 gap 0 gap)`, which opens
+   * the top *and* bottom edges together and then produces both full-height
+   * sides in a single frame when the gap reaches zero. That last frame is what
+   * read as messy: three quarters of a gesture, and then the rest of the box
+   * simply appearing.
+   *
+   * **Both halves are constant.** A box is drawn in the same time whether the
+   * command printed two lines or two hundred — the draw says *a container is
+   * arriving*, and how much ended up in it is not something the container's
+   * arrival is entitled to comment on. It is also the only way the gesture can
+   * be the same gesture every time, which is what makes it read as one thing
+   * rather than as a variable-length effect.
+   */
+  const DRAW_TOP = 0.18;
+  const DRAW_SIDES = 0.16;
+
+  /**
+   * How much the second half starts before the first has landed. The corner is
+   * the join, and a corner drawn as two separate events is two lines meeting
+   * rather than one line turning.
+   */
+  const DRAW_OVERLAP = 0.04;
+
+  /**
+   * How long the drawn box takes to grow into its content once the border is
+   * closed.
+   *
+   * **The box is held at its empty height for the whole of the draw.** Output
+   * lands during those three tenths of a second — often all of it — and a
+   * border being drawn around a box that is growing under it is the other half
+   * of what read as messy: the top edge travels outward while the bottom edge
+   * runs away downward, and neither motion is the one being watched. Pinned,
+   * the draw is a fixed rectangle every time, and the box then takes its real
+   * size as one deliberate movement afterwards.
+   *
+   * This is the sanctioned height tween `growBlock` documents, moved onto the
+   * timeline that owns the gesture. `growBlock` stays for blocks that never had
+   * a handoff at all.
+   */
+  const SPAWN_GROW = 0.28;
+
+  /**
    * How late a block may mount and still be treated as the one the user just
    * submitted. Past this the gesture is stale and the block gets the plain
    * entrance, which is always correct.
@@ -2693,8 +3100,16 @@
    * like from the outside.
    */
   function killHandoff() {
-    handoffParts.forEach((part) => part.progress(1).kill());
-    handoffParts = [];
+    // Drained rather than iterated: `progress(1)` on the block's timeline runs
+    // its last beat, and that beat *starts* the growth tween and registers it
+    // here. A `forEach` caches its length, so the one part added during the
+    // loop would be dropped unfinished — leaving the block pinned at the height
+    // its border was drawn around, which is the whole gesture failing visibly.
+    let part = handoffParts.shift();
+    while (part) {
+      part.progress(1).kill();
+      part = handoffParts.shift();
+    }
     handoffPending = false;
     // `progress(1)` runs the timeline's `onComplete`, which does both of these
     // — but only for a timeline that got as far as being built. A gesture
@@ -2704,6 +3119,17 @@
     handoffWipe = undefined;
     handoffRestore?.();
     handoffRestore = undefined;
+    // A gesture cut short before its last beat leaves a block pinned at the
+    // height its border was drawn around — a command's whole output inside a
+    // box one line tall, which is the worst thing anything in this region can
+    // fail to. The pin is an attribute, so finding one is a query rather than
+    // bookkeeping, and this only runs on an interrupt.
+    for (const el of scrollEl?.querySelectorAll<HTMLElement>("section[data-spawn]") ?? []) {
+      el.removeAttribute("data-spawn");
+      el.classList.remove("spawning");
+      el.querySelector(".block-frame")?.remove();
+      gsap.set(el, { clearProps: "height,transform,borderColor,backgroundColor" });
+    }
     releaseReveal();
   }
 
@@ -2860,6 +3286,72 @@
    * Output arriving on its own gets the entrance — a handoff per line under
    * `npm install` is the flood-control failure with extra steps.
    */
+  /**
+   * The height the block would have with nothing in it but its head — what the
+   * border is drawn around.
+   *
+   * Measured from the head rather than from the block, because by the time this
+   * runs the block may already hold a screenful: a command that finishes inside
+   * one PTY chunk mounts with all of its output in place. Falling back to the
+   * block's own height for a block with no head keeps a banner or an authored
+   * block from collapsing to nothing.
+   */
+  function emptyHeight(node: HTMLElement) {
+    const head = node.querySelector<HTMLElement>(".block-head");
+    if (!head) return node.getBoundingClientRect().height;
+    const style = getComputedStyle(node);
+    return (
+      head.getBoundingClientRect().height +
+      // The head's own bottom margin is part of an empty block's height and is
+      // not in its rect. Without it the pin is a few pixels under the block's
+      // natural empty size, so a command that has produced nothing yet still
+      // gets a growth tween — a box twitching for no reason anybody could name.
+      parseFloat(getComputedStyle(head).marginBottom) +
+      parseFloat(style.paddingTop) +
+      parseFloat(style.paddingBottom) +
+      parseFloat(style.borderTopWidth) +
+      parseFloat(style.borderBottomWidth)
+    );
+  }
+
+  /**
+   * The drawn box taking the size its content needs, once.
+   *
+   * The height is banned as a tween property everywhere else and sanctioned
+   * here for the reason `growBlock` gives: the alternative is a box going from
+   * a head to a screenful between two frames, which moves everything below it
+   * under the reader. What is different here is that the jump is *known* rather
+   * than observed — the pin is ours, so the two ends of the tween are both in
+   * hand and there is nothing to detect.
+   *
+   * `data-spawn` comes off at the *end* rather than at the start, and it is the
+   * only place it comes off. Two things hang on it — `growBlock` staying away
+   * from a height something else is tweening, and the containment that keeps
+   * the content inside a box it is temporarily taller than — and both are owed
+   * until this lands, which is after the timeline that started it has finished.
+   */
+  function growIntoContent(node: HTMLElement, from: number) {
+    node.style.removeProperty("height");
+    // One forced layout, once per command, between the two reads.
+    const to = node.getBoundingClientRect().height;
+    if (to <= from + 1) {
+      node.removeAttribute("data-spawn");
+      return undefined;
+    }
+    return gsap.fromTo(
+      node,
+      { height: from },
+      {
+        height: to,
+        duration: SPAWN_GROW,
+        ease: "power3.out",
+        overwrite: "auto",
+        clearProps: "height",
+        onComplete: () => node.removeAttribute("data-spawn"),
+      },
+    );
+  }
+
   function blockEnter(node: HTMLElement) {
     if (!reduceMotion) {
       if (handoffPending && inputBarEl && performance.now() - handoffAt < HANDOFF_STALE_MS) {
@@ -2875,7 +3367,11 @@
         // re-renders this subtree on every chunk.
         const frame = document.createElement("div");
         frame.className = "block-frame";
+        // `--gap` is the clip's inset from each side and `--drop` its inset
+        // from the bottom. The starting state is the whole box closed down to a
+        // point at the top centre: nothing drawn yet.
         frame.style.setProperty("--gap", "50%");
+        frame.style.setProperty("--drop", "100%");
         node.appendChild(frame);
         // Nothing inside the container exists until the container does. The
         // reveal only hides *text*, so without this a code block's box, its
@@ -2884,59 +3380,94 @@
         // children, because output keeps arriving during the draw and a child
         // that mounts mid-gesture has to be covered by the same rule.
         node.classList.add("spawning");
-        // The border being drawn has to be the only border on screen, and an
-        // already-filled box would give the draw nothing to describe.
-        gsap.set(node, { borderColor: "transparent", backgroundColor: "transparent" });
+        // **The box does not move while its border is being drawn.** Pinned to
+        // the height it has with nothing but its head showing, and `data-spawn`
+        // keeps `growBlock` off the same property for the duration — two tweens
+        // on one height is the fight, not the fix. Released at beat 3, which is
+        // where the box growing into its content became its own movement
+        // instead of noise underneath this one.
+        const pinned = emptyHeight(node);
+        // The attribute carries the containment as well as the guard — see the
+        // `[data-spawn]` rule in the stylesheet. It must not be plain
+        // `overflow: hidden`: the frame is 1px *outside* the block on every
+        // side, and hiding the overflow cuts the border being drawn off the
+        // block that is drawing it.
+        node.setAttribute("data-spawn", "");
+        gsap.set(node, {
+          height: pinned,
+          // The border being drawn has to be the only border on screen, and an
+          // already-filled box would give the draw nothing to describe.
+          borderColor: "transparent",
+          backgroundColor: "transparent",
+        });
         const tl = gsap.timeline({
           onComplete: () => {
             frame.remove();
             node.classList.remove("spawning");
+            // `data-spawn` is *not* removed here. The growth tween outlives
+            // this timeline and the attribute is what keeps `growBlock` off the
+            // property it is tweening and the content inside a box it is
+            // briefly taller than. `growIntoContent` owns it, on both its
+            // paths; `killHandoff` sweeps up if the gesture never got that far.
+            //
             // The transform is scaffolding. Left behind it makes the block a
             // containing block for anything positioned inside it, and an
             // identity matrix is not free to leave on a scrollback's worth of
             // sections.
+            //
+            // `height` and `overflow` are deliberately *not* cleared here. The
+            // growth tween outlives this timeline and owns both — clearing them
+            // from under it snaps the box to its full height mid-movement,
+            // which is the growth failing at the one moment it is on screen.
             gsap.set(node, { clearProps: "transform,borderColor,backgroundColor" });
             releaseReveal();
           },
         });
-        // Beat 2 — the frame opens from the top centre in both directions.
+        // Beat 2a — the top edge, opening from the centre to both corners.
         // Written from a proxy in `onUpdate` rather than tweened as a
-        // `clip-path` string: one number drives both the clip and the position
-        // of the two glowing tips, so the bright head cannot drift off the edge
-        // it is supposed to be the end of.
-        const draw = { p: 0 };
+        // `clip-path` string: two numbers drive the clip *and* the position of
+        // the two glowing heads, so a head cannot drift off the edge it is
+        // supposed to be the end of.
+        //
+        // `inOut`, never `out` — the same trap the label bar's sweep documents.
+        // An `out` ease is most of the way across before the eye has found it,
+        // so the border never reads as being *drawn*: it reads as having
+        // already been there. Starting from a standstill is what makes a draw a
+        // draw, and it is what both halves here are eased on.
+        const draw = { gap: 50, drop: 100 };
+        const paintFrame = () => {
+          frame.style.setProperty("--gap", `${draw.gap}%`);
+          frame.style.setProperty("--drop", `${draw.drop}%`);
+        };
+        tl.to(draw, { gap: 0, duration: DRAW_TOP, ease: "power2.inOut", onUpdate: paintFrame }, at);
+        // Beat 2b — the corners turn and the two sides run down to meet at the
+        // bottom. Started before the top has quite landed, so the corner is one
+        // line turning rather than two lines meeting.
         tl.to(
           draw,
-          {
-            p: 1,
-            duration: 0.34,
-            // `inOut`, never `out` — the same trap the label bar's sweep
-            // documents. An `out` ease is most of the way across before the eye
-            // has found it, so the border never reads as being *drawn*: it
-            // reads as having already been there. Starting from a standstill is
-            // what makes the draw a draw.
-            ease: "power2.inOut",
-            onUpdate: () => frame.style.setProperty("--gap", `${(1 - draw.p) * 50}%`),
-          },
-          at,
+          { drop: 0, duration: DRAW_SIDES, ease: "power2.inOut", onUpdate: paintFrame },
+          `>-${DRAW_OVERLAP}`,
         );
         // Beat 3 — the box is closed, so it becomes a real surface, its content
-        // appears, and the box bounces. All three at the same instant: the
-        // content is what the box was drawn for, and staging it after the bounce
-        // makes the container arrive twice. The reveal is released here, not on
-        // complete, so the typewriter runs *with* the bounce rather than behind
-        // it.
+        // appears, it grows into that content, and it bounces. All at the same
+        // instant: the content is what the box was drawn for, and staging it
+        // after the bounce makes the container arrive twice. The reveal is
+        // released here rather than on complete, so it runs *with* the bounce
+        // instead of behind it.
         //
         // The bounce is on the *frame*, not the block, and that is what keeps
         // the text still: the frame is an empty overlay, so widening it widens
         // the box the user sees and moves nothing inside it. Scaling the block
         // would take its content with it, and animating the block's padding or
-        // margin would push the text sideways — which is exactly what was asked
-        // to be excluded. The block's own border therefore stays transparent
-        // until the bounce is over: for those frames the frame *is* the border.
-        tl.set(node, { clearProps: "backgroundColor" });
+        // margin would push the text sideways.
         tl.call(() => {
           node.classList.remove("spawning");
+          gsap.set(node, { clearProps: "backgroundColor" });
+          // Registered with the rest of the gesture so an interrupt lands it
+          // too — it outlives the timeline that starts it, which is the one
+          // thing that would leave a block stuck at a pinned height.
+          const grow = growIntoContent(node, pinned);
+          if (grow) handoffParts.push(grow);
           releaseReveal();
         });
         // Derived from a fixed visual distance, never a constant factor: the
@@ -2952,11 +3483,13 @@
           },
           "<",
         );
-        // The glow has nothing left to draw, so it hands the edge back to the
-        // block's own border rather than cutting out — and only once the bounce
-        // has landed, or the edge would be handed over mid-stretch.
+        // The frame hands the edge back rather than cutting out, and the two
+        // happen in the *same* beat: handing it over first leaves an accent
+        // ring sitting 1px outside a border that is already there, which is the
+        // block wearing two borders for a tenth of a second. Handing it over
+        // after leaves a frame with no edge at all for the same tenth.
         tl.set(node, { clearProps: "borderColor" });
-        tl.to(frame, { autoAlpha: 0, duration: 0.12, ease: "power2.in" });
+        tl.to(frame, { autoAlpha: 0, duration: 0.12, ease: "power2.in" }, "<");
         handoffParts.push(tl);
       } else {
         // `clearProps` so the entrance leaves nothing behind: a block is
@@ -2964,7 +3497,11 @@
         // `kill()` away from being a block nobody can read.
         gsap.from(node, {
           autoAlpha: 0,
-          y: 8,
+          // A `dv` distance, not a constant 8px. Same rule as every other
+          // travel here: a fixed pixel rise is a twitch on a tall window and a
+          // lurch on a short one, and this is the same amplitude `instant`
+          // gives a line of output — which is what this is, one level up.
+          y: INSTANT_RISE * window.innerHeight,
           duration: 0.25,
           ease: "power2.out",
           clearProps: "transform,opacity,visibility",
@@ -4177,7 +4714,13 @@
     // `term` stays module-scoped for refocus()/openBlock()/snapshot().
     const t = new Terminal({
       cursorBlink: true,
-      fontFamily: "Consolas, 'DejaVu Sans Mono', monospace",
+      // Same CJK fallbacks as `--font-mono`, for the same reason: xterm draws
+      // on a cell grid and a proportional fallback puts a glyph across the
+      // boundary of its own cell. Not read from the token — xterm takes a
+      // string and cannot resolve a custom property — so the two lists are
+      // written twice and have to be changed together.
+      fontFamily:
+        "Consolas, 'DejaVu Sans Mono', 'MS Gothic', 'Noto Sans Mono CJK JP', 'Noto Sans Mono CJK SC', monospace",
       fontSize: 14,
       // Block text is read back from this buffer, so scrollback is the real
       // cap on how much of a long command's output survives.
@@ -4357,7 +4900,18 @@
       } else if (data === "B") {
         promptReady = true;
         booted = true;
+        // Mid-parse, so the cursor is standing exactly where the prompt ends
+        // and the row holds the prompt and nothing else. Read by *column*
+        // rather than by slicing the string at `cursorX`: a prompt containing
+        // a two-cell glyph has fewer characters than columns, and the two are
+        // only the same number while every glyph is one cell wide.
+        promptText = b.getLine(b.baseY + b.cursorY)?.translateToString(false, 0, b.cursorX) ?? "";
       } else if (data.startsWith("D")) {
+        // The named program has exited. Released here rather than at the next
+        // prompt so the block view is back for whatever the shell prints
+        // between the two — and released before the snapshot below, which is
+        // the pass that decides the block has no rows worth keeping.
+        rawForced = false;
         // Final snapshot must happen *here*, not in the write callback: the
         // same chunk usually carries the next prompt, and by the time that
         // callback runs the cursor has already moved onto the prompt row.
@@ -4407,13 +4961,17 @@
       return true;
     });
 
-    // Alt-screen apps (vim, htop, claude) get the raw xterm view. xterm tracks
-    // the buffer swap itself, so there's nothing to sniff out of the stream.
+    // Alt-screen apps (vim, htop) get the raw xterm view. xterm tracks the
+    // buffer swap itself, so there's nothing to sniff out of the stream.
     // `onBufferChange` is the signal, but it only fires on a real swap event;
     // the write callback re-checks the same flag every chunk so a swap that
     // lands without one still flips the view on the very next byte.
+    //
+    // The programs that never swap buffers — `claude` repainting inline, a
+    // pager git asked not to take the alt screen — come in through `rawForced`
+    // instead, which is set from the command's name before it has run.
     function syncMode() {
-      const next = t.buffer.active.type === "alternate" ? "raw" : "blocks";
+      const next = rawForced || t.buffer.active.type === "alternate" ? "raw" : "blocks";
       if (next === mode) return;
       debugPush(`mode ${mode} -> ${next}`);
       // The block that launched the app keeps its heading and result. Its rows
@@ -4432,6 +4990,7 @@
       ready.then(() => invoke("pty_resize", { cols: t.cols, rows: t.rows }));
       t.focus();
     }
+    syncModeNow = syncMode;
     t.buffer.onBufferChange(() => {
       debugPush(`onBufferChange -> ${t.buffer.active.type}`);
       syncMode();
@@ -4516,7 +5075,7 @@
                 selEnd = col + 1;
               }
             }
-            const stripped = row.replace(PS_PROMPT, "");
+            const stripped = stripPrompt(row);
             // No prompt on this row means the column maths below has nothing to
             // subtract, so `cursorCol` comes out carrying the prompt's own width
             // and `padEnd` fills the input bar with that many spaces — the caret
@@ -4624,11 +5183,25 @@
           if (local) local();
           else {
             atPrompt = false;
+            // Decided from the line, before a byte of the program's output has
+            // arrived — a program that repaints inline has already overwritten
+            // the buffer by the time anything could be inferred from it.
+            const raw = rawCommand(command);
             // Before the block exists: beat 1 has to be measured against the
             // input bar as the user left it, and the block picks the gesture up
             // when it mounts.
-            startHandoff();
+            //
+            // Skipped for a full-screen program: neither the input bar nor the
+            // block head is on screen a frame later, so the gesture would play
+            // to an empty pane and leave its own cleanup owed to nobody.
+            if (!raw) startHandoff();
             openBlock(command);
+            if (raw) {
+              rawForced = true;
+              // The block exists now, so this is the one that gets recorded as
+              // the raw block and left unsnapshotted.
+              syncModeNow();
+            }
           }
           // Both, always together: the caret is positioned by slicing `input` at
           // `cursorCol`, so clearing one without the other leaves it standing
@@ -4920,7 +5493,13 @@
                    completion pulse — one gesture, not a second one invented for
                    this slot. Success and failure animate identically; the
                    colour already carries the difference. -->
-              <div class="block-result" class:ok={block.exitCode === 0} class:err={block.exitCode !== 0} use:reveal>{exitLabel(block.exitCode ?? 0)}</div>
+              <!-- The duration joins the line with the same `·` the exit code
+                   already uses to hang a meaning off a number, so `done` and
+                   `exit 1 · failed` both grow one more clause rather than
+                   sprouting a second element. It is dropped rather than shown
+                   as zero on a block that never ran anywhere — `help` has no
+                   duration, which is not the same as having been instant. -->
+              <div class="block-result" class:ok={block.exitCode === 0} class:err={block.exitCode !== 0} use:reveal>{exitLabel(block.exitCode ?? 0)}{blockTime(block)}</div>
             {:else if block.cwd}
               <!-- The result line's slot before there is a result: what the
                    command is doing, and how to get out of it. A pager is the
@@ -4996,14 +5575,30 @@
          Not in `list_dir`: `..` is not a fact about a directory. `completions`
          in input.js adds it at the same layer and for the same reason. -->
     {#if !rel}
+      {@const upOpen = expanded.includes("..")}
       <div class="cwd-row">
-        <span class="cwd-twist empty" aria-hidden="true"></span>
+        <!-- It expands like any folder, and that is the answer to "what is
+             above me" that does not cost a `cd`. Looking up a level to find a
+             sibling is the common case and running the command was too much to
+             pay for a look; the shift+click below still writes `cd ..` for when
+             the answer is "go there". Only one level up is reachable, because
+             `..\..` is a row inside the listing this opens and would be the
+             same gesture again. -->
+        <button
+          class="cwd-twist"
+          class:open={upOpen}
+          aria-label={upOpen ? "Collapse the parent folder" : "Show the parent folder"}
+          onclick={() => toggleDir("..")}>▸</button
+        >
         <button
           class="cwd-entry dir up"
-          title="Go up one folder — puts `cd ..` at the prompt"
-          onclick={() => replaceLine("cd ..")}>..</button
+          title="The folder above — click to look, shift+click for cd"
+          onclick={(e) => (e.shiftKey ? replaceLine("cd ..") : toggleDir(".."))}>..</button
         >
       </div>
+      {#if upOpen}
+        {@render panelRows("..", 1)}
+      {/if}
     {/if}
     {#each tree[rel] ?? [] as entry (entry.name)}
       {@const child = joinRel(rel, entry.name)}
@@ -5042,6 +5637,20 @@
        Raw mode is exempt — a full-screen app owns the whole window. -->
   {#if panelOpen && mode !== "raw"}
     <aside class="cwd-panel" bind:this={panelEl} use:panelSlide>
+      <!-- The left edge is the control. Double-click puts it back to the
+           stylesheet's width, which is the only way to get a viewport-relative
+           width back once a pixel one has been chosen. -->
+      <button
+        class="cwd-grab"
+        aria-label="Resize the folder panel"
+        title="Drag to resize · double-click to reset"
+        onpointerdown={panelGrab}
+        onkeydown={panelGrabKey}
+        ondblclick={() => {
+          setPanelWidth(0);
+          saveConfig();
+        }}
+      ></button>
       <div class="cwd-panel-title" title={promptCwd}>{promptCwd || "—"}</div>
       <div class="cwd-panel-list">
         {@render panelRows("", 0)}
@@ -5270,8 +5879,37 @@
      Modern until the file lands; swapping it is this one line. The cost until
      then is that Windows and Arch render it differently. */
   .app {
-    --font-mono: "Space Mono", Consolas, "DejaVu Sans Mono", monospace;
+    /* The CJK entries are not decoration and they are not about coverage —
+       every system font can *draw* a kanji. They are about the grid. A block's
+       columns line up only while every glyph's advance is either exactly one
+       cell or exactly two, and a fallback the system picked by itself is under
+       no such obligation: one character from a proportional CJK face and every
+       column to its right on that row is off by a fraction. MS Gothic and Noto
+       Sans Mono CJK are both drawn on a 1:2 grid against a Latin mono of the
+       same size, so naming them is what makes the two-cell case exact rather
+       than approximately right. Listed before the generic `monospace` and
+       after the Latin faces, so they are only reached for characters the Latin
+       faces do not have.
+
+       This is the half of the Unicode-width blocker that CSS can answer. The
+       other half — a *proportional* mode showing column output — is not a font
+       problem and is not solved here. */
+    --font-mono: "Space Mono", Consolas, "DejaVu Sans Mono", "MS Gothic",
+      "Noto Sans Mono CJK JP", "Noto Sans Mono CJK SC", monospace;
     --font-sans: "Segoe UI", Inter, system-ui, -apple-system, sans-serif;
+  }
+
+  /* A monospace grid is a grid, so nothing may move a glyph off its cell.
+     Kerning does exactly that where a font ships pair adjustments it did not
+     expect to be used on a terminal, and a ligature that substitutes two
+     characters for one glyph is only safe while the substitute keeps both
+     advances — which is a promise the font makes, not one the renderer can
+     check. Both off wherever alignment is load-bearing. */
+  .code-text,
+  .raw-view,
+  .code-block {
+    font-kerning: none;
+    font-variant-ligatures: none;
   }
 
   .app {
@@ -5507,6 +6145,43 @@
     overflow: hidden;
   }
 
+  /* The grab handle. It straddles the panel's left border rather than sitting
+     inside it — the edge is the thing being dragged, so the target has to be
+     over the edge. No visible chrome until the pointer is on it: a permanent
+     line down the panel's side would read as a second border. */
+  .cwd-grab {
+    position: absolute;
+    top: 12px;
+    bottom: 12px;
+    left: -4px;
+    width: 9px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    border-radius: 4px;
+    cursor: ew-resize;
+    /* Or the browser claims the drag as a scroll gesture and the pointer
+       events stop arriving half way through. */
+    touch-action: none;
+    z-index: 1;
+  }
+
+  .cwd-grab::after {
+    content: "";
+    position: absolute;
+    inset: 0 3px;
+    border-radius: 2px;
+    background: var(--accent);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+
+  .cwd-grab:hover::after,
+  .cwd-grab:active::after,
+  .cwd-grab:focus-visible::after {
+    opacity: 0.75;
+  }
+
   .cwd-panel-title {
     /* The path, elided from the left: the tail is the part that identifies
        where you are, and a drive letter is the part nobody is reading. */
@@ -5673,6 +6348,22 @@
        row cadence would drift with the font mode and be unmeasurable in JS on
        the browsers that report the keyword back verbatim. */
     line-height: 1.5;
+    /* Paint containment for what is off screen, which is most of a long
+       session. docs/PERFORMANCE.md names this as the thing to try *before*
+       writing a windowing layer, on the grounds that a windowing layer is a
+       lot of machinery to buy something the browser may already do.
+
+       `auto` on `contain-intrinsic-size` is the part that makes it safe rather
+       than the part that makes it fast: it tells the browser to remember the
+       size the element last had while it was rendered, so a block that has
+       been on screen once keeps its real height when it is skipped. Without
+       it, every off-screen block would claim the fallback height and scrolling
+       up through a session would jump on every block that came into view. The
+       360px fallback is only ever used by a block that has never been laid out
+       — which, since output arrives at the bottom of the view, is none of
+       them. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 360px;
   }
 
   /* The pointer-tracked hover ring, ported from `Module.vue`. The gradient
@@ -5727,11 +6418,25 @@
     pointer-events: none;
     z-index: 3;
     background:
-      /* The two heads. Tall and narrow, so the glow covers the whole clip edge
-         — top, side and bottom — for the part of the draw where the edge has
-         turned the corner and is no longer only along the top. */
-      radial-gradient(3rem 140% at var(--gap, 50%) 50%, var(--accent), transparent 70%),
-      radial-gradient(3rem 140% at calc(100% - var(--gap, 50%)) 50%, var(--accent), transparent 70%),
+      /* The two heads, positioned by the same two numbers the clip is: `--gap`
+         puts them at the growing ends of the top edge, `--drop` carries them
+         down the sides once the corners have turned. One value cannot disagree
+         with itself — two that agree only by tuning give a bright head that
+         drifts off the edge it is meant to be the end of.
+
+         Round rather than tall: the head runs horizontally for the first half
+         of the draw and vertically for the second, and a glow shaped for one
+         of those is wrong for the other. */
+      radial-gradient(
+        2.4rem 2.4rem at var(--gap, 50%) calc(100% - var(--drop, 100%)),
+        var(--accent),
+        transparent 70%
+      ),
+      radial-gradient(
+        2.4rem 2.4rem at calc(100% - var(--gap, 50%)) calc(100% - var(--drop, 100%)),
+        var(--accent),
+        transparent 70%
+      ),
       /* The line already drawn, dimmer than its heads but still clearly the
          accent — at the block's own border colour there is nothing to watch. */
       color-mix(in srgb, var(--accent) 65%, transparent);
@@ -5739,9 +6444,18 @@
     mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
     -webkit-mask-composite: xor;
     mask-composite: exclude;
-    clip-path: inset(0 var(--gap, 50%) 0 var(--gap, 50%) round 13px);
+    /* The top edge opens outward as `--gap` closes, then the sides run down as
+       `--drop` does. `round 13px` on the inset is what keeps the drawn corner a
+       corner instead of the clip cutting a square one out of a rounded frame.
+
+       The 2px floor on the bottom inset is the height of the band the first
+       half is drawn inside: at a true 100% there is nothing left to show, and
+       the top edge would draw as a line of zero height. */
+    clip-path: inset(
+      0 var(--gap, 50%) min(var(--drop, 100%), calc(100% - 2px)) var(--gap, 50%) round 13px
+    );
     filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 55%, transparent));
-    /* The draw is the only thing on screen for 0.24s and it repaints every
+    /* The draw is the only thing on screen for 0.3s and it repaints every
        frame. Dropped with the element. */
     will-change: clip-path;
   }
@@ -5753,6 +6467,26 @@
      `blockEnter` and the children are the block's own template. */
   .block:global(.spawning) > :global(*:not(.block-frame)) {
     visibility: hidden;
+  }
+
+  /* A block whose height the spawn gesture owns — pinned to its empty height
+     while the border draws, then tweened up to what it holds.
+
+     `clip`, not `hidden`, and with a margin. The frame doing the drawing sits
+     1px *outside* the block on every side, so plain `overflow: hidden` cuts the
+     border off the block that is drawing it — a box drawing its own edge and
+     clipping it away in the same frame. `overflow-clip-margin` is the one thing
+     that says "contain the content, keep painting just past the edge", which is
+     exactly the two requirements here.
+
+     Keyed on the attribute rather than set inline, so the containment and the
+     `growBlock` guard are the same fact rather than two that have to agree.
+     `:global` on the attribute for the same reason `.spawning` needs it: it is
+     written by `blockEnter`, so the compiler cannot see it in the template and
+     prunes the rule as unused. */
+  .block:global([data-spawn]) {
+    overflow: clip;
+    overflow-clip-margin: 2px;
   }
 
   /* The focused block: a rail down its left edge, the same affordance an editor

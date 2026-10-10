@@ -127,7 +127,7 @@ export type Accent = keyof typeof ACCENTS;
  * above rather than a resolved colour or font stack — see `config.rs`.
  */
 export type Config = {
-  appearance: { accent: string; font: string };
+  appearance: { accent: string; font: string; panel_width: number };
   behavior: { scroll: string; reveal: string };
   shell: { cwd: string };
   system: { start_as_admin: boolean };

@@ -47,6 +47,21 @@ Run from `compat/flood/`. Each gets a number, not a verdict.
 - [ ] output arriving while a reveal is mid-flight
 - [ ] all of the above with the cwd panel open
 
+## Optimisations landed without a number
+
+The rule below was suspended once, deliberately and on instruction, and this section is the record of it. Each of these is exactly the kind of change that needs a before and an after, and each has neither.
+
+| Date | Change | What it was supposed to buy | Measured |
+|---|---|---|---|
+| 2026-08-10 | PTY read coalescing — a 64 KB buffer, flushed when the pipe goes quiet rather than on a timer | Fewer IPC messages under flood, with idle CPU untouched | not measured |
+| 2026-08-12 | `content-visibility: auto` + `contain-intrinsic-size: auto 360px` on `.block` | Paint and layout skipped for off-screen blocks | not measured |
+| 2026-08-12 | `trimBlocks` — 500 blocks or 1 MiB of text, oldest first, with their markers, runs and byte logs | RSS in a long session, and the cost of every walk over mounted blocks | not measured |
+| 2026-08-12 | `syncStuck` skips heads with an empty rect | The per-frame walk over mounted blocks | not measured |
+
+The first three each want the same pair of numbers: RSS and frame time after 100k lines, with the change and without it.
+
 ## Rule
 
 **No optimisation lands without a before and after number in this file.** That is what the file is for. A budget missed by a little is information and gets recorded; a benchmark file containing only passes is the problem this file was created to fix.
+
+**When the rule is suspended, the suspension is written down** — see the section above. An unmeasured optimisation that is recorded as unmeasured is a debt. One that is not recorded is a claim.

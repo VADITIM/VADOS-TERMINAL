@@ -29,6 +29,8 @@ Legend: `[ ]` not run · `[x]` matches the comparison terminal · `[~]` differs,
 
 **`unicode/width.txt` is the one most likely to fail in block mode**, and it is tracked as a blocker — a rendered block's columns line up only while every glyph is one cell wide. See [tasks.md](../.claude/tasks.md).
 
+**A fixture is `cat`-ed, so it tests the pipe rather than the shell's own encoder.** The other half — what the shell writes when it is the one printing — is `Write-Output "héllo — ünïcode ✓ 日本語"` in PowerShell and its `echo` equivalent elsewhere. Windows PowerShell 5.1 defaults to the console's OEM code page in both directions, so `integration.ps1` sets `[Console]::OutputEncoding`, `[Console]::InputEncoding` and `$OutputEncoding` to UTF-8; without that every non-ASCII character it printed reached a UTF-8 decoder as invalid bytes. Check the typed direction too — an accented character at the prompt must reach the shell unchanged.
+
 ---
 
 ## Shells
@@ -57,15 +59,17 @@ The ones that decide whether this is a real terminal.
 |---|---|---|---|
 | | `vim` | Alt screen, cursor control, resize | `[ ]` |
 | | `nvim` | The same, plus truecolor | `[ ]` |
-| | `less` | Alt screen off (`-X`), paging, `q` | `[!]` — [renders as a screenshot of the pager](../.claude/tasks.md) |
+| | `less <file>` | Alt screen off (`-X`), paging, `q` | `[ ]` — named in `RAW_COMMANDS`, so it should now take the raw view |
 | | `htop` | Continuous repaint, colour, mouse | `[ ]` |
 | | `btop` | Truecolor, braille glyphs, heavy repaint | `[ ]` |
-| | `fzf` | Inline (non-alt-screen) full-screen UI, live filtering | `[ ]` |
-| | `claude` | Ink, repaints inline, never sets `?1049h` | `[!]` — [renders as a bare prompt](../.claude/tasks.md) |
+| | `fzf` | Inline (non-alt-screen) full-screen UI, live filtering | `[ ]` — named, not detected |
+| | `claude` | Ink, repaints inline, never sets `?1049h` | `[ ]` — named, not detected. The row this whole mechanism exists for |
+| | `echo vim`, `git log --oneline` | **The false positive.** An ordinary command must not land in the raw view | `[ ]` |
 | | `tmux` | Nested terminal, its own resize, Ctrl+B prefix | `[ ]` |
 | | `ssh <host>` | The whole stream through two PTYs | `[ ]` |
 | | `ssh <host>` then `vim` | **The highest-value row here.** If this is indistinguishable from a conventional terminal, most of this phase passes | `[ ]` |
-| | `git log` / `git diff` | Pager, colour, wide output | `[ ]` |
+| | `git log` / `git diff` | Pager, colour, wide output. `git` picks its own pager, so there is no name on the line to read — this is the half of the pager gap that is still open | `[ ]` |
+| | `git log \| less` | The pager named on the line, through a pipe | `[ ]` |
 | | `git status` | Colour that VAD/OS currently drops in block mode | `[ ]` |
 | | `docker ps` / `docker logs -f` | Wide columns, and a follow that never ends | `[ ]` |
 | | `python` REPL | Line editing, Ctrl+D, tracebacks | `[ ]` |

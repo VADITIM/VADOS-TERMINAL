@@ -124,7 +124,9 @@ This is the same rule [PERFORMANCE.md](PERFORMANCE.md) states for incremental pa
 
 **Rule.** **This is not a parser bug and no parser fix improves it.** When output looks scrambled, first establish whether the program is repainting. If it is, the answer is upstream.
 
-Still open — it is [tasks.md](../tasks.md)'s first blocker, and it is architecture rather than a patch.
+**Answered (2026-08-12), and the shape of the answer is the part worth keeping.** Every candidate for detecting a repaint from the stream — repaint rate, sustained `?25l`, mouse reporting — is a heuristic, and a heuristic here is paid for by *ordinary* output, where a false positive drops a normal command into the raw view. The option that had been listed as the weakest, an opt-out list, is the strongest precisely because it is not an inference: `RAW_COMMANDS` in `input.js` reads the program's name off the submitted line before it runs. A name is wrong only for a program that happens to share one.
+
+The generalisation: **when every way of inferring something costs the common case, stop inferring and ask something that already knows.** The command line knew. What remains is `git diff`, where git picks the pager itself and there is no name on the line — the one case where nothing knows.
 
 ---
 
@@ -152,6 +154,8 @@ Still open — it is [tasks.md](../tasks.md)'s first blocker, and it is architec
 - OSC sequences terminated with ST (`ESC \`) are two bytes, the second of which is a backslash. Anything that drops the ESC leaves a literal `\` on screen that the line editor never typed and cannot erase.
 
 **Rule.** In `integration.ps1`, everything that is not visible prompt text goes straight to the console with `[Console]::Write`, and only `133;B` — which marks the point *after* the prompt text — stays in the returned string. Terminate OSC with BEL, one byte, which cannot be split.
+
+**The BEL half is not PowerShell's and was left in the other snippets for two months.** It was found under PSReadLine, so it was fixed under PSReadLine — but nothing in the cause is about PowerShell: any line editor that redraws a prompt can lose an ESC, and bash, zsh and fish were all still sending ST. Brought to the same rule 2026-08-12. **When a fix is written against the shell a bug was found in, check whether the cause was.**
 
 ---
 
@@ -292,6 +296,8 @@ Still open — it is [tasks.md](../tasks.md)'s first blocker, and it is architec
 **Cause.** None of them. Windows PowerShell 5.1's `Get-Content` reads a file with no BOM as the ANSI codepage, so it decoded the file wrong, re-encoded the mistake as UTF-8, and wrote *that* down the pipe. The bytes reaching the terminal were valid UTF-8 spelling the wrong characters, and every decoder along the way did its job. `Get-Content -Encoding UTF8` on the same file is clean, and so is `pwsh`.
 
 **Rule.** **When text arrives wrong, first find out whether it arrived wrong.** Encoding faults are indistinguishable from rendering faults on screen, so the question is settled at the boundary, not in the renderer: check the same command in another terminal, or read the raw bytes back. A terminal that "fixed" this by injecting encoding defaults into the shell would be answering for the shell's semantics, which is exactly what [decisions.md](../decisions.md) rules out — and would corrupt genuinely ANSI files in the other direction.
+
+**Do not read that as forbidding `[Console]::OutputEncoding`, which the integration now sets (2026-08-12).** They are different boundaries and only one of them is the shell's business. *How the shell decodes a file it was asked to read* is the shell's semantics, and setting a default for it changes what `Get-Content` means — that is the thing this entry rules out. *What encoding the shell writes down the pipe* is the pipe's contract, and both ends have to agree on it or nothing works: 5.1 defaulted to the console's OEM code page while the frontend decodes UTF-8, so every non-ASCII character the shell printed itself was mojibake for a reason that genuinely was ours. The test for which side of the line a change falls on: **does it alter what a command produces, or only how what it produced is carried?**
 
 **Family.** §19 and §21 — three shapes of the same mistake: the boundary is where the meaning changed, and the local code is only where it became visible.
 

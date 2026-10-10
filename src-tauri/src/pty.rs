@@ -23,6 +23,8 @@ use tauri::State;
 const BASH_INTEGRATION: &str = include_str!("../resources/shell/integration.bash");
 #[cfg(not(windows))]
 const ZSH_INTEGRATION: &str = include_str!("../resources/shell/integration.zsh");
+#[cfg(not(windows))]
+const FISH_INTEGRATION: &str = include_str!("../resources/shell/integration.fish");
 #[cfg(windows)]
 const POWERSHELL_INTEGRATION: &str = include_str!("../resources/shell/integration.ps1");
 
@@ -176,12 +178,17 @@ fn build_shell_command(elevate: bool) -> Result<CommandBuilder, String> {
         std::fs::write(dir.join(".zshrc"), ZSH_INTEGRATION).map_err(|e| e.to_string())?;
         cmd.env("ZDOTDIR", dir);
         cmd.arg("-i");
+    } else if shell_name == "fish" {
+        // `--init-command` runs after the user's own config, which is what makes
+        // the snippet able to wrap their prompt rather than replace it. It takes
+        // one command, so the snippet is sourced from a file instead of being
+        // passed inline — a multi-line argument would work and would put every
+        // quoting rule in this file between here and the shell.
+        let rcfile = write_temp("fish-rc", FISH_INTEGRATION)?;
+        cmd.arg("--init-command");
+        cmd.arg(format!("source {}", rcfile.display()));
+        cmd.arg("-i");
     } else {
-        // Fish has no equivalent injection flag — falls back to plain, unintegrated.
-        // No OSC 133 events for fish sessions until a manual rc line ships (see tasks.md).
-        if shell_name == "fish" {
-            return Ok(cmd);
-        }
         let rcfile = write_temp("bash-rc", BASH_INTEGRATION)?;
         cmd.arg("--rcfile");
         cmd.arg(rcfile);

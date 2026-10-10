@@ -7,6 +7,7 @@ import {
   completionRequest,
   completions,
   quotePath,
+  rawCommand,
   resolveDir,
   runOptions,
   segments,
@@ -255,5 +256,26 @@ assert.deepEqual(segments("status", 4, 2, 8), [
 ]);
 // A range entirely past the run contributes nothing to it.
 assert.deepEqual(segments("git", 0, 8, 12), [{ text: "git", sel: false }]);
+
+// ── which lines take the raw view ──────────────────────────────────────────
+// The false positive is the expensive one: a normal command dropped into the
+// raw view is a worse regression than a TUI rendered badly, so anything the
+// list does not name stays in block mode.
+assert.equal(rawCommand("vim notes.txt"), true);
+assert.equal(rawCommand("claude"), true);
+assert.equal(rawCommand("git status"), false);
+assert.equal(rawCommand(""), false);
+// A path, a Windows extension, and casing all resolve to the program's name.
+assert.equal(rawCommand("C:\\tools\\vim.EXE"), true);
+assert.equal(rawCommand("/usr/bin/htop"), true);
+// The word that owns the screen is not always the first one.
+assert.equal(rawCommand("sudo htop"), true);
+assert.equal(rawCommand("npx claude"), true);
+// The last stage of a pipeline is the one on screen.
+assert.equal(rawCommand("git log | less"), true);
+assert.equal(rawCommand("git log --oneline"), false);
+// A name that merely *contains* one is a different program.
+assert.equal(rawCommand("vimtutor"), false);
+assert.equal(rawCommand("echo vim"), false);
 
 console.log("input.check.mjs OK");

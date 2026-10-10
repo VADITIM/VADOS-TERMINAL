@@ -378,6 +378,102 @@ export const COMMAND_WORDS = {
 };
 
 /**
+ * Programs that take the screen for as long as they run, named rather than
+ * detected.
+ *
+ * The stream cannot answer this on its own. Alt-screen entry (`?1049h`) is the
+ * signal for `vim` and `htop`, and it is the whole of what the renderer watches
+ * — but `claude` repaints *inline*, and `less -X` is asked by git not to take
+ * the alt screen at all, so both of them are drawn over a buffer the block
+ * renderer is still reading. Every candidate for inferring that from the stream
+ * (repaint rate, sustained `?25l`, mouse reporting) is a heuristic that costs
+ * ordinary output a false positive, and a false positive here drops a normal
+ * command into the raw view. A name is not a heuristic: it is wrong only for a
+ * program that happens to share it.
+ *
+ * The list is what a conventional terminal would show anyway, so the failure
+ * direction is the one .claude/foundation/phase-h2-compatibility.md asks for —
+ * a program that is not on it renders as it always did, and a program on it
+ * behaves exactly like a terminal with no block renderer in it.
+ */
+export const RAW_COMMANDS = new Set([
+  // Editors.
+  "vim",
+  "vi",
+  "nvim",
+  "vimdiff",
+  "nano",
+  "emacs",
+  "helix",
+  "hx",
+  "micro",
+  // Pagers, and the things that reach for one.
+  "less",
+  "more",
+  "most",
+  "man",
+  "bat",
+  // Monitors and pickers.
+  "top",
+  "htop",
+  "btop",
+  "btm",
+  "nvtop",
+  "fzf",
+  "ranger",
+  "yazi",
+  "lazygit",
+  "lazydocker",
+  "gitui",
+  "k9s",
+  // Multiplexers, and a remote shell — neither has our integration inside it,
+  // so neither produces command boundaries to build blocks out of.
+  "tmux",
+  "screen",
+  "zellij",
+  "ssh",
+  // Inline-repainting TUIs. `claude` is the one this list exists for.
+  "claude",
+]);
+
+/**
+ * Words that do not change which program owns the screen, so the decision is
+ * taken from what follows them.
+ */
+const RAW_PREFIX = new Set(["sudo", "doas", "npx", "command", "winpty", "time"]);
+
+/**
+ * Whether `line` runs something from `RAW_COMMANDS`.
+ *
+ * Every stage of a pipeline is asked, because the program that owns the screen
+ * is the last one in it: `git log | less` is a pager session however it was
+ * reached.
+ *
+ * ponytail: words are split on whitespace and stages on a bare `|`, so shell
+ * quoting is not parsed — a quoted path containing a space (`"C:\Program
+ * Files\Vim\vim.exe"`) is not recognised, and a pipe character inside quotes
+ * reads as a stage boundary. Both fail toward block mode, which is the cheap
+ * direction. A real parse belongs to the phase-12 shell registry, which is
+ * also the only place that knows whose quoting rules apply.
+ *
+ * @param {string} line
+ * @returns {boolean}
+ */
+export function rawCommand(line) {
+  return line.split("|").some((stage) => {
+    for (const word of stage.trim().split(/\s+/)) {
+      // `C:\tools\vim.exe` and `/usr/bin/vim` are both `vim`.
+      const name = (word.split(/[\\/]/).pop() ?? "")
+        .replace(/\.(exe|cmd|bat|ps1)$/i, "")
+        .toLowerCase();
+      if (RAW_PREFIX.has(name)) continue;
+      return RAW_COMMANDS.has(name);
+    }
+    return false;
+  });
+}
+
+/**
  * The word-to-command pairs, flattened once at module load rather than per
  * keystroke. Order follows the table, so the more literal word of a pair
  * ("remove" before "delete") is the one a shared prefix finds first.

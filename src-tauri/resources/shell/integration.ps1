@@ -9,6 +9,29 @@
 # Windows PowerShell 5.1 does not support the `e backtick-escape (PS7+ only),
 # so ESC is built explicitly via [char]27.
 $global:__vadosEsc = [char]27
+
+# The pipe carries UTF-8 and the frontend decodes it as UTF-8, so the shell has
+# to write it. Windows PowerShell 5.1 defaults `[Console]::OutputEncoding` to
+# the console's OEM code page (437 or 850 on most machines) and `$OutputEncoding`
+# — what it encodes with when piping to a native program — to ASCII. Neither is
+# UTF-8, so every non-ASCII character the shell printed arrived as bytes that
+# are not valid UTF-8 and were decoded as replacement characters.
+#
+# This is the terminal's business rather than the shell's preference: the PTY is
+# a byte pipe with an encoding, and agreeing on it is what makes the two ends
+# the same session. A BOM-less encoder, because a BOM here is three bytes of
+# garbage at the head of the first thing written.
+#
+# Not wrapped in a version check: PowerShell 7 already defaults to UTF-8, so
+# this is a no-op there rather than a change. It is guarded against a host that
+# refuses the assignment, which is the one case where failing loudly would cost
+# the user their whole shell over an encoding.
+try {
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [Console]::OutputEncoding = $utf8
+    [Console]::InputEncoding = $utf8
+    $global:OutputEncoding = $utf8
+} catch {}
 # BEL as the OSC terminator, not the two-byte ST (ESC \). ST is legal and it is
 # what this file used to send, but it is two bytes with a backslash as the
 # second one, and anything that loses or consumes the ESC — a redraw that
